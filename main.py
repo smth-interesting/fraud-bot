@@ -222,7 +222,7 @@ async def start_game(message, state: FSMContext, verified: bool):
 @router.callback_query(F.data == "answer_call", GameStates.in_game)
 async def answer_call(cb: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    if not data or "tasks" not in 
+    if not data or "tasks" not in data:
         await cb.message.answer("❌ Ошибка сессии. Начните заново через /start")
         return
 
@@ -254,7 +254,7 @@ async def scammer_background(user_id: int, state: FSMContext):
             await asyncio.sleep(random.randint(25, 40))
             data = await state.get_data()
             # ИСПРАВЛЕНИЕ КРИТИЧЕСКОЙ ОШИБКИ: добавлено 'data'
-            if "start_time" not in 
+            if "start_time" not in data:
                 break
             await bot.send_message(user_id, f"🕵️ <b>Мошенник:</b> {random.choice(phrases)}")
     except asyncio.CancelledError:
@@ -265,7 +265,7 @@ async def scammer_background(user_id: int, state: FSMContext):
 @router.message(GameStates.in_game)
 async def handle_game_message(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    if not data or "current_task_idx" not in 
+    if not data or "current_task_idx" not in data:
         return
     
     tasks = data["tasks"]
