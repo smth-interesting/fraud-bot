@@ -48,7 +48,7 @@ dp.include_router(router)
 
 # Пул соединений с БД
 db_pool = None
-active_games = {}  # tg_id -> {"task": asyncio.Task}
+active_games = {}
 
 # MIDDLEWARE ДЛЯ ЗАЩИТЫ ОТ СПАМА
 class ThrottlingMiddleware(BaseMiddleware):
@@ -236,7 +236,7 @@ async def start_game(message, state: FSMContext, verified: bool):
 @router.callback_query(F.data == "answer_call", GameStates.in_game)
 async def answer_call(cb: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    if not data or "tasks" not in 
+    if not data or "tasks" not in data:
         await cb.message.answer("❌ Ошибка сессии. Начните заново через /start")
         return
 
@@ -267,7 +267,7 @@ async def scammer_background(user_id: int, state: FSMContext):
         while True:
             await asyncio.sleep(random.randint(25, 40))
             data = await state.get_data()
-            if "start_time" not in 
+            if "start_time" not in data:
                 break
             await bot.send_message(user_id, f"🕵️ <b>Мошенник:</b> {random.choice(phrases)}")
     except asyncio.CancelledError:
@@ -278,7 +278,7 @@ async def scammer_background(user_id: int, state: FSMContext):
 @router.message(GameStates.in_game)
 async def handle_game_message(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    if not data or "current_task_idx" not in 
+    if not data or "current_task_idx" not in data:
         return
     
     tasks = data["tasks"]
@@ -323,7 +323,7 @@ async def finish_game_cb(cb: types.CallbackQuery, state: FSMContext):
 
 async def finish_game(message, state: FSMContext, forced_end=False):
     data = await state.get_data()
-    if not data or "start_time" not in 
+    if not data or "start_time" not in data:
         await message.answer("❌ Ошибка сессии. Данные потеряны.")
         return
 
