@@ -265,7 +265,8 @@ async def handle_game_message(message: types.Message, state: FSMContext):
     
     tasks = data["tasks"]
     idx = data["current_task_idx"]
-    if idx >= len(tasks): return
+    if idx >= len(tasks):
+        return
     
     task_row = tasks[idx]
     task_keywords = [w.strip() for w in task_row[3].split(",")]
@@ -380,11 +381,16 @@ async def process_feedback(message: types.Message, state: FSMContext):
 
 # ДОП. КОМАНДЫ
 @router.message(Command("rules"))
-async def cmd_rules(m: types.Message): await m.answer(RULES_TEXT)
+async def cmd_rules(m: types.Message):
+    await m.answer(RULES_TEXT)
+
 @router.message(Command("privacy"))
-async def cmd_priv(m: types.Message): await m.answer(PRIVACY_TEXT)
+async def cmd_priv(m: types.Message):
+    await m.answer(PRIVACY_TEXT)
+
 @router.message(Command("terms"))
-async def cmd_terms(m: types.Message): await m.answer(TERMS_TEXT)
+async def cmd_terms(m: types.Message):
+    await m.answer(TERMS_TEXT)
 
 @router.message(Command("delete_data"))
 async def cmd_delete(m: types.Message):
@@ -407,7 +413,8 @@ async def cmd_leaderboard(m: types.Message):
                          WHERE s.duration >= 180 GROUP BY u.tg_id ORDER BY best DESC LIMIT 10""")
             rows = await cursor.fetchall()
         
-        if not rows: return await m.answer("🏆 Рейтинг пока пуст.")
+        if not rows:
+            return await m.answer("🏆 Рейтинг пока пуст.")
         
         text = "🏆 <b>ТОП-10 ИГРОКОВ</b>\n"
         for i, (nick, ver, sc) in enumerate(rows, 1):
