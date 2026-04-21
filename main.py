@@ -9,7 +9,8 @@ import time
 from datetime import datetime
 from dotenv import load_dotenv
 
-import aiosqlite
+import asyncpg
+import aiohttp
 from aiogram import Bot, Dispatcher, Router, F, types
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -18,6 +19,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.dispatcher.middlewares.base import BaseMiddleware
+from aiohttp import web
 
 # НАСТРОЙКА ЛОГИРОВАНИЯ
 logging.basicConfig(
@@ -35,6 +37,8 @@ load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
 PHONE_SALT = os.getenv("PHONE_SALT", "default_salt_change_in_env").encode()
+DATABASE_URL = os.getenv("DATABASE_URL")
+PORT = int(os.getenv("PORT", 8080))
 
 # НАСТРОЙКА БОТА
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -42,8 +46,9 @@ dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
-DB_PATH = "bot_data.db"
-active_games = {}
+# Пул соединений с БД
+db_pool = None
+active_games = {}  # tg_id -> {"task": asyncio.Task}
 
 # MIDDLEWARE ДЛЯ ЗАЩИТЫ ОТ СПАМА
 class ThrottlingMiddleware(BaseMiddleware):
@@ -67,40 +72,39 @@ dp.update.middleware(ThrottlingMiddleware(rate_limit=1.0))
 def hash_phone(phone: str) -> str:
     return hmac.new(PHONE_SALT, phone.encode(), hashlib.sha256).hexdigest()
 
-# БАЗА ДАННЫХ
-async def init_db(db_conn):
-    await db_conn.execute('''CREATE TABLE IF NOT EXISTS users
-                 (tg_id INTEGER PRIMARY KEY, nickname TEXT, phone_hash TEXT, 
-                  consent_longterm INTEGER DEFAULT 0, verified INTEGER DEFAULT 0, 
-                  created_at TEXT)''')
-    await db_conn.execute('''CREATE TABLE IF NOT EXISTS tasks
-                 (id INTEGER PRIMARY KEY, round_num INTEGER, text TEXT, keywords TEXT, mask_words TEXT)''')
-    await db_conn.execute('''CREATE TABLE IF NOT EXISTS sessions
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, tg_id INTEGER, start_time REAL, end_time REAL, 
-                  duration REAL, tasks_done INTEGER, score REAL, status TEXT)''')
-    await db_conn.execute('''CREATE TABLE IF NOT EXISTS analytics
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, event TEXT, payload TEXT, created_at TEXT)''')
-    
-    cur = await db_conn.execute("SELECT COUNT(*) FROM tasks")
-    count = (await cur.fetchone())[0]
-    if count == 0:
-        tasks = [
-            (1, 1, "2+2=? Скажи ответ в разговоре с мошенником", "два, четыре, 4", "кстати, между прочим, а скажи"),
-            (2, 1, "Назови три любых цвета радуги", "красный, оранжевый, жёлтый, синий, зелёный", "например, вообще, скажи"),
-            (3, 1, "Назови столицу России", "москва", "кстати, а где, столица это"),
-            (4, 2, "Напиши фразу только ЗАГЛАВНЫМИ БУКВАМИ, имитируя крик", "ВЕРХНИЙ РЕГИСТР", "послушайте, зачем вы, я просто"),
-            (5, 2, "Сделай вид, что обиделся на мошенника", "обида, ладно, понял, всё ясно", "ну хорошо, извините, не хочу"),
-            (6, 2, "Ответь максимально коротко (1–3 слова), будто боишься, что рядом кто-то слышит", "да, нет, ок, понял", "тише, шёпотом, аккуратно"),
-            (7, 3, "Крякни 5 раз", "кря, утка, кряк", "ребёнок, фон, извините"),
-            (8, 3, "Спроси у мошенника: «А вы любите ананасы на пицце?»", "ананас, пицца", "кстати, вопрос, а вы"),
-            (9, 3, "Вставь в сообщение строчку из любой детской песенки", "чунга, кузнечик, траве, сидел", "напеваю, детство, песня")
-        ]
-        await db_conn.executemany("INSERT INTO tasks VALUES (?,?,?,?,?)", tasks)
-    await db_conn.commit()
+# БАЗА ДАННЫХ (PostgreSQL)
+async def init_db(pool):
+    async with pool.acquire() as conn:
+        await conn.execute('''CREATE TABLE IF NOT EXISTS users
+                     (tg_id BIGINT PRIMARY KEY, nickname TEXT, phone_hash TEXT, 
+                      consent_longterm INT DEFAULT 0, verified INT DEFAULT 0, 
+                      created_at TEXT)''')
+        await conn.execute('''CREATE TABLE IF NOT EXISTS tasks
+                     (id SERIAL PRIMARY KEY, round_num INT, text TEXT, keywords TEXT, mask_words TEXT)''')
+        await conn.execute('''CREATE TABLE IF NOT EXISTS sessions
+                     (id SERIAL PRIMARY KEY, tg_id BIGINT, start_time DOUBLE PRECISION, end_time DOUBLE PRECISION, 
+                      duration DOUBLE PRECISION, tasks_done INT, score DOUBLE PRECISION, status TEXT)''')
+        await conn.execute('''CREATE TABLE IF NOT EXISTS analytics
+                     (id SERIAL PRIMARY KEY, event TEXT, payload TEXT, created_at TEXT)''')
+        
+        cur = await conn.fetchrow("SELECT COUNT(*) as cnt FROM tasks")
+        count = cur["cnt"]
+        if count == 0:
+            tasks = [
+                (1, 1, "2+2=? Скажи ответ в разговоре с мошенником", "два, четыре, 4", "кстати, между прочим, а скажи"),
+                (2, 1, "Назови три любых цвета радуги", "красный, оранжевый, жёлтый, синий, зелёный", "например, вообще, скажи"),
+                (3, 1, "Назови столицу России", "москва", "кстати, а где, столица это"),
+                (4, 2, "Напиши фразу только ЗАГЛАВНЫМИ БУКВАМИ, имитируя крик", "ВЕРХНИЙ РЕГИСТР", "послушайте, зачем вы, я просто"),
+                (5, 2, "Сделай вид, что обиделся на мошенника", "обида, ладно, понял, всё ясно", "ну хорошо, извините, не хочу"),
+                (6, 2, "Ответь максимально коротко (1–3 слова), будто боишься, что рядом кто-то слышит", "да, нет, ок, понял", "тише, шёпотом, аккуратно"),
+                (7, 3, "Крякни 5 раз", "кря, утка, кряк", "ребёнок, фон, извините"),
+                (8, 3, "Спроси у мошенника: «А вы любите ананасы на пицце?»", "ананас, пицца", "кстати, вопрос, а вы"),
+                (9, 3, "Вставь в сообщение строчку из любой детской песенки", "чунга, кузнечик, траве, сидел", "напеваю, детство, песня")
+            ]
+            await conn.executemany("INSERT INTO tasks VALUES (DEFAULT, $1, $2, $3, $4)", tasks)
+    logger.info("Database initialized and connected.")
 
-db_pool = None
-
-# ТЕКСТЫ
+# Глобальные тексты
 DISCLAIMER = (
     "⚠️ <b>ВНИМАНИЕ:</b> Это учебный симулятор. Все диалоги, номера и сценарии вымышлены.\n"
     "🎯 <b>Цель проекта:</b> тренировка навыков распознавания мошеннических схем в безопасной среде.\n"
@@ -124,6 +128,17 @@ class GameStates(StatesGroup):
     waiting_contact = State()
     in_game = State()
     waiting_feedback = State()
+
+# ВЕБХУК ОБРАБОТЧИК
+async def webhook_handler(request: web.Request):
+    try:
+        update_data = await request.json()
+        update = types.Update(**update_data)
+        await dp.feed_update(bot, update)
+        return web.Response()
+    except Exception as e:
+        logger.error(f"Webhook handler error: {e}")
+        return web.Response(status=500)
 
 # ЛОГИКА ИГРЫ
 @router.message(CommandStart())
@@ -165,10 +180,14 @@ async def save_contact(message: types.Message, state: FSMContext):
     nickname = html.escape(message.from_user.username or "user")
     
     try:
-        async with db_pool.cursor() as cursor:
-            await cursor.execute("INSERT OR REPLACE INTO users VALUES (?,?,?,?,?,?)", 
-                      (message.from_user.id, nickname, phone_hash, 0, 1, datetime.now().isoformat()))
-        await db_pool.commit()
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO users (tg_id, nickname, phone_hash, consent_longterm, verified, created_at)
+                   VALUES ($1, $2, $3, 0, 1, $4)
+                   ON CONFLICT (tg_id) DO UPDATE SET
+                   nickname = $2, phone_hash = $3, verified = 1""",
+                message.from_user.id, nickname, phone_hash, datetime.now().isoformat()
+            )
     except Exception as e:
         logger.error(f"DB Error in save_contact: {e}")
         await message.answer("❌ Произошла ошибка при сохранении данных. Попробуйте позже.")
@@ -184,9 +203,8 @@ async def guest_start(cb: types.CallbackQuery, state: FSMContext):
 
 async def start_game(message, state: FSMContext, verified: bool):
     try:
-        async with db_pool.cursor() as cursor:
-            await cursor.execute("SELECT * FROM tasks ORDER BY RANDOM() LIMIT 9")
-            tasks = await cursor.fetchall()
+        async with db_pool.acquire() as conn:
+            tasks = await conn.fetch("SELECT * FROM tasks ORDER BY RANDOM() LIMIT 9")
         
         await state.update_data({
             "verified": verified,
@@ -218,11 +236,11 @@ async def start_game(message, state: FSMContext, verified: bool):
 @router.callback_query(F.data == "answer_call", GameStates.in_game)
 async def answer_call(cb: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    if not data or "tasks" not in data:
+    if not data or "tasks" not in 
         await cb.message.answer("❌ Ошибка сессии. Начните заново через /start")
         return
 
-    task_text = data["tasks"][0][2]
+    task_text = data["tasks"][0]["text"]
     
     await cb.message.answer(
         f"🕵️ <b>Мошенник:</b> Здравствуйте, это служба безопасности. Мы зафиксировали подозрительную операцию...\n\n"
@@ -249,7 +267,7 @@ async def scammer_background(user_id: int, state: FSMContext):
         while True:
             await asyncio.sleep(random.randint(25, 40))
             data = await state.get_data()
-            if "start_time" not in data:
+            if "start_time" not in 
                 break
             await bot.send_message(user_id, f"🕵️ <b>Мошенник:</b> {random.choice(phrases)}")
     except asyncio.CancelledError:
@@ -260,7 +278,7 @@ async def scammer_background(user_id: int, state: FSMContext):
 @router.message(GameStates.in_game)
 async def handle_game_message(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    if not data or "current_task_idx" not in data:
+    if not data or "current_task_idx" not in 
         return
     
     tasks = data["tasks"]
@@ -269,8 +287,8 @@ async def handle_game_message(message: types.Message, state: FSMContext):
         return
     
     task_row = tasks[idx]
-    task_keywords = [w.strip() for w in task_row[3].split(",")]
-    mask_words = [w.strip() for w in task_row[4].split(",")]
+    task_keywords = [w.strip() for w in task_row["keywords"].split(",")]
+    mask_words = [w.strip() for w in task_row["mask_words"].split(",")]
     
     msg_lower = (message.text or "").lower()
     found_keywords = any(kw in msg_lower for kw in task_keywords)
@@ -291,7 +309,7 @@ async def handle_game_message(message: types.Message, state: FSMContext):
             round_name = ["Логика", "Актёрство", "Импровизация"][next_idx // 3]
             await message.answer(
                 f"✅ Задание засчитано!\n\n"
-                f"🎯 <b>ЗАДАНИЕ {next_idx+1} (Раунд {round_name}):</b> {tasks[next_idx][2]}\n"
+                f"🎯 <b>ЗАДАНИЕ {next_idx+1} (Раунд {round_name}):</b> {tasks[next_idx]['text']}\n"
                 "💡 Вплети это в диалог органично."
             )
         else:
@@ -305,8 +323,7 @@ async def finish_game_cb(cb: types.CallbackQuery, state: FSMContext):
 
 async def finish_game(message, state: FSMContext, forced_end=False):
     data = await state.get_data()
-    
-    if not data or "start_time" not in data:
+    if not data or "start_time" not in 
         await message.answer("❌ Ошибка сессии. Данные потеряны.")
         return
 
@@ -331,10 +348,11 @@ async def finish_game(message, state: FSMContext, forced_end=False):
     await log_analytics("session_end", f"duration={int(duration)}, tasks={tasks_done}, forced={forced_end}")
     
     try:
-        async with db_pool.cursor() as cursor:
-            await cursor.execute("INSERT INTO sessions VALUES (NULL,?,?,?,?,?,?)",
-                      (message.from_user.id, data["start_time"], time.time(), duration, tasks_done, score, "ended"))
-        await db_pool.commit()
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO sessions (tg_id, start_time, end_time, duration, tasks_done, score, status) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                message.from_user.id, data["start_time"], time.time(), duration, tasks_done, score, "ended"
+            )
     except Exception as e:
         logger.error(f"DB Error saving session for {message.from_user.id}: {e}")
     
@@ -381,24 +399,18 @@ async def process_feedback(message: types.Message, state: FSMContext):
 
 # ДОП. КОМАНДЫ
 @router.message(Command("rules"))
-async def cmd_rules(m: types.Message):
-    await m.answer(RULES_TEXT)
-
+async def cmd_rules(m: types.Message): await m.answer(RULES_TEXT)
 @router.message(Command("privacy"))
-async def cmd_priv(m: types.Message):
-    await m.answer(PRIVACY_TEXT)
-
+async def cmd_priv(m: types.Message): await m.answer(PRIVACY_TEXT)
 @router.message(Command("terms"))
-async def cmd_terms(m: types.Message):
-    await m.answer(TERMS_TEXT)
+async def cmd_terms(m: types.Message): await m.answer(TERMS_TEXT)
 
 @router.message(Command("delete_data"))
 async def cmd_delete(m: types.Message):
     try:
-        async with db_pool.cursor() as cursor:
-            await cursor.execute("DELETE FROM users WHERE tg_id=?", (m.from_user.id,))
-            await cursor.execute("DELETE FROM sessions WHERE tg_id=?", (m.from_user.id,))
-        await db_pool.commit()
+        async with db_pool.acquire() as conn:
+            await conn.execute("DELETE FROM users WHERE tg_id=$1", m.from_user.id)
+            await conn.execute("DELETE FROM sessions WHERE tg_id=$1", m.from_user.id)
         await m.answer("🗑️ Ваши данные удалены.")
     except Exception as e:
         logger.error(f"Error deleting data for {m.from_user.id}: {e}")
@@ -407,19 +419,17 @@ async def cmd_delete(m: types.Message):
 @router.message(Command("leaderboard"))
 async def cmd_leaderboard(m: types.Message):
     try:
-        async with db_pool.cursor() as cursor:
-            await cursor.execute("""SELECT u.nickname, u.verified, MAX(s.score) as best 
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch("""SELECT u.nickname, u.verified, MAX(s.score) as best 
                          FROM users u JOIN sessions s ON u.tg_id = s.tg_id 
                          WHERE s.duration >= 180 GROUP BY u.tg_id ORDER BY best DESC LIMIT 10""")
-            rows = await cursor.fetchall()
         
-        if not rows:
-            return await m.answer("🏆 Рейтинг пока пуст.")
+        if not rows: return await m.answer("🏆 Рейтинг пока пуст.")
         
         text = "🏆 <b>ТОП-10 ИГРОКОВ</b>\n"
-        for i, (nick, ver, sc) in enumerate(rows, 1):
-            safe_nick = html.escape(nick or "Anon")
-            text += f"{i}. {safe_nick} {'✅' if ver else ''} — {int(sc)} ₽\n"
+        for i, row in enumerate(rows, 1):
+            safe_nick = html.escape(row["nickname"] or "Anon")
+            text += f"{i}. {safe_nick} {'✅' if row['verified'] else ''} — {int(row['best'])} ₽\n"
         await m.answer(text)
     except Exception as e:
         logger.error(f"Error fetching leaderboard: {e}")
@@ -427,26 +437,40 @@ async def cmd_leaderboard(m: types.Message):
 
 async def log_analytics(event, payload):
     try:
-        async with db_pool.cursor() as cursor:
-            await cursor.execute("INSERT INTO analytics VALUES (NULL, ?, ?, ?)", (event, payload, datetime.now().isoformat()))
-        await db_pool.commit()
+        async with db_pool.acquire() as conn:
+            await conn.execute("INSERT INTO analytics (event, payload, created_at) VALUES ($1, $2, $3)", event, payload, datetime.now().isoformat())
     except Exception as e:
         logger.error(f"Analytics error: {e}")
 
 # ГЛАВНАЯ ФУНКЦИЯ ЗАПУСКА
-async def main():
+async def on_startup(app):
     global db_pool
-    db_pool = await aiosqlite.connect(DB_PATH)
+    db_pool = await asyncpg.create_pool(dsn=DATABASE_URL)
     await init_db(db_pool)
-    logger.info("Database initialized and connected.")
-    try:
-        await dp.start_polling(bot)
-    finally:
+    
+    webhook_url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME', 'localhost')}/bot{TOKEN}"
+    await bot.set_webhook(webhook_url)
+    logger.info(f"Webhook set to {webhook_url}")
+
+async def on_shutdown(app):
+    if db_pool:
         await db_pool.close()
-        logger.info("Bot stopped and DB connection closed.")
+    await bot.delete_webhook()
+    await bot.session.close()
+    logger.info("Bot and DB pool closed.")
 
 if __name__ == "__main__":
     if not TOKEN or "СЮДА" in TOKEN or "ВСТАВЬ" in TOKEN:
         print("❌ Ошибка: вставь токен и ADMIN_ID в .env!")
         exit()
-    asyncio.run(main())
+    if not DATABASE_URL or "postgres://" not in DATABASE_URL:
+        print("❌ Ошибка: DATABASE_URL не настроен!")
+        exit()
+        
+    app = web.Application()
+    app.router.add_post(f"/bot{TOKEN}", webhook_handler)
+    app.on_startup.append(on_startup)
+    app.on_shutdown.append(on_shutdown)
+    
+    logger.info("Starting webhook server...")
+    web.run_app(app, host="0.0.0.0", port=PORT)
