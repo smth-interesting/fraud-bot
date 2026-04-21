@@ -19,7 +19,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.dispatcher.middlewares.base import BaseMiddleware
 
-# НАСТРОЙКА ЛОГИРОВАНИЯ (Вместо молчаливого поглощения ошибок)
+# НАСТРОЙКА ЛОГИРОВАНИЯ
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -43,9 +43,9 @@ router = Router()
 dp.include_router(router)
 
 DB_PATH = "bot_data.db"
-active_games = {}  # tg_id -> {"task": asyncio.Task}
+active_games = {}
 
-# --- MIDDLEWARE ДЛЯ ЗАЩИТЫ ОТ СПАМА (RATE LIMITING) ---
+# MIDDLEWARE ДЛЯ ЗАЩИТЫ ОТ СПАМА
 class ThrottlingMiddleware(BaseMiddleware):
     def __init__(self, rate_limit: float = 1.0):
         self.rate_limit = rate_limit
@@ -57,18 +57,17 @@ class ThrottlingMiddleware(BaseMiddleware):
             now = time.time()
             if user_id in self.last_message and now - self.last_message[user_id] < self.rate_limit:
                 logger.info(f"User {user_id} throttled.")
-                return  # Игнорируем сообщение, если слишком часто
+                return
             self.last_message[user_id] = now
         return await handler(event, data)
 
-# Применяем middleware ко всем обновлениям
 dp.update.middleware(ThrottlingMiddleware(rate_limit=1.0))
 
-# 🔐 БЕЗОПАСНОЕ ХЭШИРОВАНИЕ ТЕЛЕФОНОВ
+# БЕЗОПАСНОЕ ХЭШИРОВАНИЕ
 def hash_phone(phone: str) -> str:
     return hmac.new(PHONE_SALT, phone.encode(), hashlib.sha256).hexdigest()
 
-# 🔐 БАЗА ДАННЫХ
+# БАЗА ДАННЫХ
 async def init_db(db_conn):
     await db_conn.execute('''CREATE TABLE IF NOT EXISTS users
                  (tg_id INTEGER PRIMARY KEY, nickname TEXT, phone_hash TEXT, 
@@ -99,10 +98,9 @@ async def init_db(db_conn):
         await db_conn.executemany("INSERT INTO tasks VALUES (?,?,?,?,?)", tasks)
     await db_conn.commit()
 
-# Глобальное соединение с БД (оптимизация Этапа 2)
 db_pool = None
 
-# 📜 ТЕКСТЫ
+# ТЕКСТЫ
 DISCLAIMER = (
     "⚠️ <b>ВНИМАНИЕ:</b> Это учебный симулятор. Все диалоги, номера и сценарии вымышлены.\n"
     "🎯 <b>Цель проекта:</b> тренировка навыков распознавания мошеннических схем в безопасной среде.\n"
@@ -121,13 +119,13 @@ RULES_TEXT = (
 PRIVACY_TEXT = "🔒 <b>Политика конфиденциальности:</b>\n1. Собираем Telegram ID, ник и хэш телефона для верификации.\n2. Номер не передаётся третьим лицам.\n3. Сообщения хранятся ≤72 часов без согласия.\n4. Удаляйте данные командой /delete_data."
 TERMS_TEXT = "📜 <b>Правила:</b>\n1. 16+.\n2. Запрещён спам и мошенничество.\n3. Бот «как есть».\n4. Играя, вы соглашаетесь с правилами."
 
-# 🎮 СОСТОЯНИЯ
+# СОСТОЯНИЯ
 class GameStates(StatesGroup):
     waiting_contact = State()
     in_game = State()
     waiting_feedback = State()
 
-# 🛠 ЛОГИКА ИГРЫ
+# ЛОГИКА ИГРЫ
 @router.message(CommandStart())
 async def cmd_start(message: types.Message, state: FSMContext):
     await message.answer(DISCLAIMER, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -159,13 +157,12 @@ async def req_contact(cb: types.CallbackQuery, state: FSMContext):
 
 @router.message(GameStates.waiting_contact, F.contact)
 async def save_contact(message: types.Message, state: FSMContext):
-    # Проверка: контакт должен принадлежать пользователю
     if message.contact.user_id != message.from_user.id:
         await message.answer("❌ Нельзя использовать чужой номер телефона!")
         return
 
     phone_hash = hash_phone(str(message.contact.phone_number))
-    nickname = html.escape(message.from_user.username or "user") # Защита от XSS
+    nickname = html.escape(message.from_user.username or "user")
     
     try:
         async with db_pool.cursor() as cursor:
@@ -200,7 +197,6 @@ async def start_game(message, state: FSMContext, verified: bool):
         })
         await state.set_state(GameStates.in_game)
         
-        # Очищаем старую задачу, если она была
         if message.from_user.id in active_games:
             old_task = active_games[message.from_user.id].get("task")
             if old_task and not old_task.done():
@@ -253,7 +249,6 @@ async def scammer_background(user_id: int, state: FSMContext):
         while True:
             await asyncio.sleep(random.randint(25, 40))
             data = await state.get_data()
-            # ИСПРАВЛЕНИЕ КРИТИЧЕСКОЙ ОШИБКИ: добавлено 'data'
             if "start_time" not in data:
                 break
             await bot.send_message(user_id, f"🕵️ <b>Мошенник:</b> {random.choice(phrases)}")
@@ -310,15 +305,13 @@ async def finish_game_cb(cb: types.CallbackQuery, state: FSMContext):
 async def finish_game(message, state: FSMContext, forced_end=False):
     data = await state.get_data()
     
-    # ВАЛИДАЦИЯ ДАННЫХ (Этап 1)
-    if not data or "start_time" not in 
+    if not data or "start_time" not in data:
         await message.answer("❌ Ошибка сессии. Данные потеряны.")
         return
 
     duration = time.time() - data["start_time"]
     tasks_done = data.get("tasks_done", 0)
     
-    # ОЧИСТКА ПАМЯТИ (Этап 2)
     if message.from_user.id in active_games:
         ag = active_games[message.from_user.id]
         if ag["task"] and not ag["task"].done():
@@ -352,7 +345,7 @@ async def finish_game(message, state: FSMContext, forced_end=False):
     ]))
     await state.clear()
 
-# 📝 ОТЗЫВЫ
+# ОТЗЫВЫ
 @router.callback_query(F.data == "feedback_start")
 async def req_feedback(cb: types.CallbackQuery, state: FSMContext):
     await cb.message.answer("Оцените игру от 1 до 5:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -371,7 +364,6 @@ async def process_feedback(message: types.Message, state: FSMContext):
     data = await state.get_data()
     text = message.text if message.text != "/skip" else "Без комментария"
     
-    # ЗАЩИТА ОТ XSS (Этап 2)
     safe_text = html.escape(text)
     safe_nick = html.escape(message.from_user.username or "Anon")
     
@@ -386,7 +378,7 @@ async def process_feedback(message: types.Message, state: FSMContext):
     await message.answer("Спасибо за отзыв!")
     await state.clear()
 
-# 🛠 ДОП. КОМАНДЫ
+# ДОП. КОМАНДЫ
 @router.message(Command("rules"))
 async def cmd_rules(m: types.Message): await m.answer(RULES_TEXT)
 @router.message(Command("privacy"))
@@ -419,7 +411,6 @@ async def cmd_leaderboard(m: types.Message):
         
         text = "🏆 <b>ТОП-10 ИГРОКОВ</b>\n"
         for i, (nick, ver, sc) in enumerate(rows, 1):
-            # ЗАЩИТА ОТ XSS (Этап 2)
             safe_nick = html.escape(nick or "Anon")
             text += f"{i}. {safe_nick} {'✅' if ver else ''} — {int(sc)} ₽\n"
         await m.answer(text)
@@ -435,13 +426,12 @@ async def log_analytics(event, payload):
     except Exception as e:
         logger.error(f"Analytics error: {e}")
 
-# 🚀 ГЛАВНАЯ ФУНКЦИЯ ЗАПУСКА (Этап 1)
+# ГЛАВНАЯ ФУНКЦИЯ ЗАПУСКА
 async def main():
     global db_pool
     db_pool = await aiosqlite.connect(DB_PATH)
     await init_db(db_pool)
     logger.info("Database initialized and connected.")
-    
     try:
         await dp.start_polling(bot)
     finally:
