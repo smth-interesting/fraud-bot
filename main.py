@@ -19,20 +19,13 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMar
 from aiogram.dispatcher.middlewares.base import BaseMiddleware
 from aiohttp import web
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler("bot.log"),
-        logging.StreamHandler()
-    ]
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", handlers=[logging.FileHandler("bot.log"), logging.StreamHandler()])
 logger = logging.getLogger(__name__)
 
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
-PHONE_SALT = os.getenv("PHONE_SALT", "default_salt_change_in_env").encode()
+PHONE_SALT = os.getenv("PHONE_SALT", "default_salt").encode()
 DATABASE_URL = os.getenv("DATABASE_URL")
 PORT = int(os.getenv("PORT", 8080))
 
@@ -40,7 +33,6 @@ bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 router = Router()
 dp.include_router(router)
-
 db_pool = None
 active_games = {}
 
@@ -48,13 +40,11 @@ class ThrottlingMiddleware(BaseMiddleware):
     def __init__(self, rate_limit: float = 1.0):
         self.rate_limit = rate_limit
         self.last_message = {}
-
     async def __call__(self, handler, event, data):
         user_id = event.from_user.id if hasattr(event, 'from_user') else None
         if user_id:
             now = time.time()
             if user_id in self.last_message and now - self.last_message[user_id] < self.rate_limit:
-                logger.info(f"User {user_id} throttled.")
                 return
             self.last_message[user_id] = now
         return await handler(event, data)
@@ -66,36 +56,17 @@ def hash_phone(phone: str) -> str:
 
 async def init_db(pool):
     async with pool.acquire() as conn:
-        await conn.execute('''CREATE TABLE IF NOT EXISTS users
-                     (tg_id BIGINT PRIMARY KEY, nickname TEXT, phone_hash TEXT, 
-                      consent_longterm INT DEFAULT 0, verified INT DEFAULT 0, 
-                      created_at TEXT)''')
-        await conn.execute('''CREATE TABLE IF NOT EXISTS tasks
-                     (id SERIAL PRIMARY KEY, round_num INT, text TEXT, keywords TEXT, mask_words TEXT)''')
-        await conn.execute('''CREATE TABLE IF NOT EXISTS sessions
-                     (id SERIAL PRIMARY KEY, tg_id BIGINT, start_time DOUBLE PRECISION, end_time DOUBLE PRECISION, 
-                      duration DOUBLE PRECISION, tasks_done INT, score DOUBLE PRECISION, status TEXT)''')
-        await conn.execute('''CREATE TABLE IF NOT EXISTS analytics
-                     (id SERIAL PRIMARY KEY, event TEXT, payload TEXT, created_at TEXT)''')
-        
+        await conn.execute("CREATE TABLE IF NOT EXISTS users (tg_id BIGINT PRIMARY KEY, nickname TEXT, phone_hash TEXT, consent_longterm INT DEFAULT 0, verified INT DEFAULT 0, created_at TEXT)")
+        await conn.execute("CREATE TABLE IF NOT EXISTS tasks (id SERIAL PRIMARY KEY, round_num INT, text TEXT, keywords TEXT, mask_words TEXT)")
+        await conn.execute("CREATE TABLE IF NOT EXISTS sessions (id SERIAL PRIMARY KEY, tg_id BIGINT, start_time DOUBLE PRECISION, end_time DOUBLE PRECISION, duration DOUBLE PRECISION, tasks_done INT, score DOUBLE PRECISION, status TEXT)")
+        await conn.execute("CREATE TABLE IF NOT EXISTS analytics (id SERIAL PRIMARY KEY, event TEXT, payload TEXT, created_at TEXT)")
         cur = await conn.fetchrow("SELECT COUNT(*) as cnt FROM tasks")
-        count = cur["cnt"]
-        if count == 0:
-            tasks = [
-                (1, 1, "2+2=? Скажи ответ в разговоре с мошенником", "два, четыре, 4", "кстати, между прочим, а скажи"),
-                (2, 1, "Назови три любых цвета радуги", "красный, оранжевый, жёлтый, синий, зелёный", "например, вообще, скажи"),
-                (3, 1, "Назови столицу России", "москва", "кстати, а где, столица это"),
-                (4, 2, "Напиши фразу только ЗАГЛАВНЫМИ БУКВАМИ, имитируя крик", "ВЕРХНИЙ РЕГИСТР", "послушайте, зачем вы, я просто"),
-                (5, 2, "Сделай вид, что обиделся на мошенника", "обида, ладно, понял, всё ясно", "ну хорошо, извините, не хочу"),
-                (6, 2, "Ответь максимально коротко (1–3 слова), будто боишься, что рядом кто-то слышит", "да, нет, ок, понял", "тише, шёпотом, аккуратно"),
-                (7, 3, "Крякни 5 раз", "кря, утка, кряк", "ребёнок, фон, извините"),
-                (8, 3, "Спроси у мошенника: «А вы любите ананасы на пицце?»", "ананас, пицца", "кстати, вопрос, а вы"),
-                (9, 3, "Вставь в сообщение строчку из любой детской песенки", "чунга, кузнечик, траве, сидел", "напеваю, детство, песня")
-            ]
+        if cur["cnt"] == 0:
+            tasks = [(1, 1, "2+2=? Скажи ответ", "два, четыре, 4", "кстати, между прочим"), (2, 1, "Назови три цвета радуги", "красный, оранжевый, жёлтый, синий", "например, вообще"), (3, 1, "Назови столицу России", "москва", "кстати, а где"), (4, 2, "Пиши ЗАГЛАВНЫМИ", "ВЕРХНИЙ РЕГИСТР", "послушайте, зачем"), (5, 2, "Сделай вид что обиделся", "обида, ладно, понял", "ну хорошо, извините"), (6, 2, "Ответь кратко (1-3 слова)", "да, нет, ок", "тише, шёпотом"), (7, 3, "Крякни 5 раз", "кря, утка", "ребёнок, фон"), (8, 3, "Спроси про ананасы на пицце", "ананас, пицца", "кстати, вопрос"), (9, 3, "Вставь строчку из песни", "чунга, кузнечик", "напеваю, детство")]
             await conn.executemany("INSERT INTO tasks VALUES (DEFAULT, $1, $2, $3, $4)", tasks)
-    logger.info("Database initialized.")
+    logger.info("DB initialized")
 
-DISCLAIMER = "⚠️ <b>ВНИМАНИЕ:</b> Это учебный симулятор.\n🎯 <b>Цель:</b> тренировка навыков.\n🚫 <b>НИКОГДА</b> не сообщай реальные данные."
+DISCLAIMER = "⚠️ <b>ВНИМАНИЕ:</b> Учебный симулятор.\n🎯 <b>Цель:</b> тренировка навыков.\n🚫 <b>НИКОГДА</b> не сообщай реальные данные."
 RULES_TEXT = "📖 <b>ПРАВИЛА:</b>\n✅ Вплетаи задания органично\n❌ Не пиши в лоб\n⏱ Минимум 3 минуты"
 PRIVACY_TEXT = "🔒 <b>Политика:</b>\n1. Собираем ID и хэш телефона\n2. Не передаём третьим лицам\n3. /delete_data для удаления"
 TERMS_TEXT = "📜 <b>Правила:</b>\n1. 16+\n2. Запрещён спам\n3. Бот «как есть»"
@@ -117,22 +88,15 @@ async def webhook_handler(request: web.Request):
 
 @router.message(CommandStart())
 async def cmd_start(message: types.Message, state: FSMContext):
-    await message.answer(DISCLAIMER, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Принимаю", callback_data="accept_rules")]
-    ]))
+    await message.answer(DISCLAIMER, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Принимаю", callback_data="accept_rules")]]))
 
 @router.callback_query(F.data == "accept_rules")
 async def accept_rules(cb: types.CallbackQuery, state: FSMContext):
-    await cb.message.answer("🎯 <b>Как играть:</b>\nВыбери режим:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📱 С регистрацией", callback_data="reg_contact")],
-        [InlineKeyboardButton(text="👤 Гостевой режим", callback_data="guest_mode")]
-    ]))
+    await cb.message.answer("🎯 <b>Как играть:</b>\nВыбери режим:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📱 С регистрацией", callback_data="reg_contact")], [InlineKeyboardButton(text="👤 Гостевой режим", callback_data="guest_mode")]]))
 
 @router.callback_query(F.data == "reg_contact")
 async def req_contact(cb: types.CallbackQuery, state: FSMContext):
-    await cb.message.answer("📱 Подтвердите номер:", reply_markup=ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text="📤 Поделиться контактом", request_contact=True)]
-    ], resize_keyboard=True))
+    await cb.message.answer("📱 Подтвердите номер:", reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📤 Поделиться контактом", request_contact=True)]], resize_keyboard=True))
     await state.set_state(GameStates.waiting_contact)
 
 @router.message(GameStates.waiting_contact, F.contact)
@@ -144,10 +108,7 @@ async def save_contact(message: types.Message, state: FSMContext):
     nickname = html.escape(message.from_user.username or "user")
     try:
         async with db_pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO users (tg_id, nickname, phone_hash, verified, created_at) VALUES ($1, $2, $3, 1, $4) ON CONFLICT (tg_id) DO UPDATE SET nickname=$2, phone_hash=$3, verified=1",
-                message.from_user.id, nickname, phone_hash, datetime.now().isoformat()
-            )
+            await conn.execute("INSERT INTO users (tg_id, nickname, phone_hash, verified, created_at) VALUES ($1, $2, $3, 1, $4) ON CONFLICT (tg_id) DO UPDATE SET nickname=$2, phone_hash=$3, verified=1", message.from_user.id, nickname, phone_hash, datetime.now().isoformat())
     except Exception as e:
         logger.error(f"DB Error: {e}")
         await message.answer("❌ Ошибка сохранения.")
@@ -164,13 +125,7 @@ async def start_game(message, state: FSMContext, verified: bool):
     try:
         async with db_pool.acquire() as conn:
             tasks = await conn.fetch("SELECT * FROM tasks ORDER BY RANDOM() LIMIT 9")
-        await state.update_data({
-            "verified": verified,
-            "tasks": tasks,
-            "current_task_idx": 0,
-            "tasks_done": 0,
-            "start_time": time.time()
-        })
+        await state.update_data({"verified": verified, "tasks": tasks, "current_task_idx": 0, "tasks_done": 0, "start_time": time.time()})
         await state.set_state(GameStates.in_game)
         if message.from_user.id in active_games:
             old_task = active_games[message.from_user.id].get("task")
@@ -181,9 +136,7 @@ async def start_game(message, state: FSMContext, verified: bool):
                 except asyncio.CancelledError:
                     pass
         active_games[message.from_user.id] = {"task": None}
-        await message.answer("📞 <b>ВХОДЯЩИЙ ВЫЗОВ...</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Принять", callback_data="answer_call")]
-        ]))
+        await message.answer("📞 <b>ВХОДЯЩИЙ ВЫЗОВ...</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Принять", callback_data="answer_call")]]))
     except Exception as e:
         logger.error(f"Error: {e}")
         await message.answer("❌ Ошибка. /start")
@@ -191,16 +144,11 @@ async def start_game(message, state: FSMContext, verified: bool):
 @router.callback_query(F.data == "answer_call", GameStates.in_game)
 async def answer_call(cb: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    if not data or "tasks" not in 
+    if not data or "tasks" not in data:
         await cb.message.answer("❌ Ошибка. /start")
         return
     task_text = data["tasks"][0]["text"]
-    await cb.message.answer(
-        f"🕵️ <b>Мошенник:</b> Здравствуйте...\n\n🎯 <b>ЗАДАНИЕ 1:</b> {task_text}\n💡 Вплети органично!\n⏱ Таймер запущен.",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📞 Завершить", callback_data="end_call")]
-        ])
-    )
+    await cb.message.answer(f"🕵️ <b>Мошенник:</b> Здравствуйте...\n\n🎯 <b>ЗАДАНИЕ 1:</b> {task_text}\n💡 Вплети органично!\n⏱ Таймер запущен.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📞 Завершить", callback_data="end_call")]]))
     task = asyncio.create_task(scammer_background(cb.message.from_user.id, state))
     active_games[cb.message.from_user.id]["task"] = task
 
@@ -256,7 +204,7 @@ async def finish_game_cb(cb: types.CallbackQuery, state: FSMContext):
 
 async def finish_game(message, state: FSMContext, forced_end=False):
     data = await state.get_data()
-    if not data or "start_time" not in 
+    if not data or "start_time" not in data:
         await message.answer("❌ Ошибка.")
         return
     duration = time.time() - data["start_time"]
@@ -277,24 +225,17 @@ async def finish_game(message, state: FSMContext, forced_end=False):
     await log_analytics("session_end", f"duration={int(duration)}, tasks={tasks_done}")
     try:
         async with db_pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO sessions (tg_id, start_time, end_time, duration, tasks_done, score, status) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-                message.from_user.id, data["start_time"], time.time(), duration, tasks_done, score, "ended"
-            )
+            await conn.execute("INSERT INTO sessions (tg_id, start_time, end_time, duration, tasks_done, score, status) VALUES ($1, $2, $3, $4, $5, $6, $7)", message.from_user.id, data["start_time"], time.time(), duration, tasks_done, score, "ended")
     except Exception as e:
         logger.error(f"DB Error: {e}")
     text = f"📞 <b>ВЫЗОВ ЗАВЕРШЁН</b>\n⏱ {int(duration)} сек\n✅ {tasks_done}/9\n💰 {int(score)} ₽\n"
     text += "🏆 <b>В рейтинг!</b>\n" if in_leaderboard else "⏱ <3 мин\n"
-    await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📝 Отзыв", callback_data="feedback_start")]
-    ]))
+    await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📝 Отзыв", callback_data="feedback_start")]]))
     await state.clear()
 
 @router.callback_query(F.data == "feedback_start")
 async def req_feedback(cb: types.CallbackQuery, state: FSMContext):
-    await cb.message.answer("Оценка 1-5:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=str(i), callback_data=f"fb_{i}") for i in range(1,6)]
-    ]))
+    await cb.message.answer("Оценка 1-5:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=str(i), callback_data=f"fb_{i}") for i in range(1,6)]]))
     await state.set_state(GameStates.waiting_feedback)
 
 @router.callback_query(F.data.startswith("fb_"), GameStates.waiting_feedback)
@@ -311,7 +252,7 @@ async def process_feedback(message: types.Message, state: FSMContext):
     safe_nick = html.escape(message.from_user.username or "Anon")
     await log_analytics("feedback", f"user={message.from_user.id}, rating={data.get('rating','?')}")
     if ADMIN_ID:
-        try: 
+        try:
             await bot.send_message(ADMIN_ID, f"📝 Отзыв от {safe_nick}:\n⭐ {data.get('rating','?')}\n💬 {safe_text}")
         except Exception as e:
             logger.error(f"Error: {e}")
