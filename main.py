@@ -8,9 +8,7 @@ import random
 import time
 from datetime import datetime
 from dotenv import load_dotenv
-
 import asyncpg
-import aiohttp
 from aiogram import Bot, Dispatcher, Router, F, types
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -21,7 +19,6 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMar
 from aiogram.dispatcher.middlewares.base import BaseMiddleware
 from aiohttp import web
 
-# НАСТРОЙКА ЛОГИРОВАНИЯ
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -32,7 +29,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ЗАГРУЗКА КОНФИГА
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
@@ -40,17 +36,14 @@ PHONE_SALT = os.getenv("PHONE_SALT", "default_salt_change_in_env").encode()
 DATABASE_URL = os.getenv("DATABASE_URL")
 PORT = int(os.getenv("PORT", 8080))
 
-# НАСТРОЙКА БОТА
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
-# Пул соединений с БД
 db_pool = None
 active_games = {}
 
-# MIDDLEWARE ДЛЯ ЗАЩИТЫ ОТ СПАМА
 class ThrottlingMiddleware(BaseMiddleware):
     def __init__(self, rate_limit: float = 1.0):
         self.rate_limit = rate_limit
@@ -68,11 +61,9 @@ class ThrottlingMiddleware(BaseMiddleware):
 
 dp.update.middleware(ThrottlingMiddleware(rate_limit=1.0))
 
-# БЕЗОПАСНОЕ ХЭШИРОВАНИЕ
 def hash_phone(phone: str) -> str:
     return hmac.new(PHONE_SALT, phone.encode(), hashlib.sha256).hexdigest()
 
-# БАЗА ДАННЫХ (PostgreSQL)
 async def init_db(pool):
     async with pool.acquire() as conn:
         await conn.execute('''CREATE TABLE IF NOT EXISTS users
@@ -102,34 +93,18 @@ async def init_db(pool):
                 (9, 3, "Вставь в сообщение строчку из любой детской песенки", "чунга, кузнечик, траве, сидел", "напеваю, детство, песня")
             ]
             await conn.executemany("INSERT INTO tasks VALUES (DEFAULT, $1, $2, $3, $4)", tasks)
-    logger.info("Database initialized and connected.")
+    logger.info("Database initialized.")
 
-# Глобальные тексты
-DISCLAIMER = (
-    "⚠️ <b>ВНИМАНИЕ:</b> Это учебный симулятор. Все диалоги, номера и сценарии вымышлены.\n"
-    "🎯 <b>Цель проекта:</b> тренировка навыков распознавания мошеннических схем в безопасной среде.\n"
-    "🚫 <b>НИКОГДА</b> не сообщай реальные данные (номера карт, пароли, коды из СМС) в этом боте или в подозрительных звонках.\n"
-    "⛔ Не используй полученные знания для обхода реальных систем безопасности или причинения вреда третьим лицам.\n\n"
-    "Продолжая игру, ты принимаешь эти условия и Политику конфиденциальности."
-)
-RULES_TEXT = (
-    "📖 <b>КАК ВЫПОЛНЯТЬ ЗАДАНИЯ:</b>\n"
-    "Твоя цель — вплетать задания в диалог <b>органично</b>.\n\n"
-    "✅ <b>Хорошо:</b> «Кстати, а какой цвет у радуги первый? Красный, оранжевый...»\n"
-    "❌ <b>Плохо:</b> «Красный оранжевый жёлтый (выполняю задание)»\n\n"
-    "💡 Мошенник реагирует на ключевые слова. Если напишешь «в лоб» — он заподозрит неладное.\n"
-    "⏱ Минимум 3 минуты разговора нужно, чтобы очки попали в рейтинг."
-)
-PRIVACY_TEXT = "🔒 <b>Политика конфиденциальности:</b>\n1. Собираем Telegram ID, ник и хэш телефона для верификации.\n2. Номер не передаётся третьим лицам.\n3. Сообщения хранятся ≤72 часов без согласия.\n4. Удаляйте данные командой /delete_data."
-TERMS_TEXT = "📜 <b>Правила:</b>\n1. 16+.\n2. Запрещён спам и мошенничество.\n3. Бот «как есть».\n4. Играя, вы соглашаетесь с правилами."
+DISCLAIMER = "⚠️ <b>ВНИМАНИЕ:</b> Это учебный симулятор.\n🎯 <b>Цель:</b> тренировка навыков.\n🚫 <b>НИКОГДА</b> не сообщай реальные данные."
+RULES_TEXT = "📖 <b>ПРАВИЛА:</b>\n✅ Вплетаи задания органично\n❌ Не пиши в лоб\n⏱ Минимум 3 минуты"
+PRIVACY_TEXT = "🔒 <b>Политика:</b>\n1. Собираем ID и хэш телефона\n2. Не передаём третьим лицам\n3. /delete_data для удаления"
+TERMS_TEXT = "📜 <b>Правила:</b>\n1. 16+\n2. Запрещён спам\n3. Бот «как есть»"
 
-# СОСТОЯНИЯ
 class GameStates(StatesGroup):
     waiting_contact = State()
     in_game = State()
     waiting_feedback = State()
 
-# ВЕБХУК ОБРАБОТЧИК
 async def webhook_handler(request: web.Request):
     try:
         update_data = await request.json()
@@ -137,75 +112,58 @@ async def webhook_handler(request: web.Request):
         await dp.feed_update(bot, update)
         return web.Response()
     except Exception as e:
-        logger.error(f"Webhook handler error: {e}")
+        logger.error(f"Webhook error: {e}")
         return web.Response(status=500)
 
-# ЛОГИКА ИГРЫ
 @router.message(CommandStart())
 async def cmd_start(message: types.Message, state: FSMContext):
     await message.answer(DISCLAIMER, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Принимаю условия и начинаю", callback_data="accept_rules")]
+        [InlineKeyboardButton(text="✅ Принимаю", callback_data="accept_rules")]
     ]))
 
 @router.callback_query(F.data == "accept_rules")
 async def accept_rules(cb: types.CallbackQuery, state: FSMContext):
-    await cb.message.answer(
-        "🎯 <b>Как играть:</b>\nТы ведёшь диалог с «мошенником» и получаешь задания. "
-        "Вплетаи их в разговор так, чтобы собеседник не заподозрил подвох.\n\n"
-        "👇 Выбери режим:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📱 С регистрацией (доступ к рейтингу)", callback_data="reg_contact")],
-            [InlineKeyboardButton(text="👤 Гостевой режим", callback_data="guest_mode")]
-        ])
-    )
+    await cb.message.answer("🎯 <b>Как играть:</b>\nВыбери режим:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📱 С регистрацией", callback_data="reg_contact")],
+        [InlineKeyboardButton(text="👤 Гостевой режим", callback_data="guest_mode")]
+    ]))
 
 @router.callback_query(F.data == "reg_contact")
 async def req_contact(cb: types.CallbackQuery, state: FSMContext):
-    await cb.message.answer(
-        "📱 Для доступа к лидерборду подтвердите номер телефона.\n"
-        "Нажимая кнопку, вы даёте согласие на обработку номера для верификации.",
-        reply_markup=ReplyKeyboardMarkup(keyboard=[
-            [KeyboardButton(text="📤 Поделиться контактом", request_contact=True)]
-        ], resize_keyboard=True)
-    )
+    await cb.message.answer("📱 Подтвердите номер:", reply_markup=ReplyKeyboardMarkup(keyboard=[
+        [KeyboardButton(text="📤 Поделиться контактом", request_contact=True)]
+    ], resize_keyboard=True))
     await state.set_state(GameStates.waiting_contact)
 
 @router.message(GameStates.waiting_contact, F.contact)
 async def save_contact(message: types.Message, state: FSMContext):
     if message.contact.user_id != message.from_user.id:
-        await message.answer("❌ Нельзя использовать чужой номер телефона!")
+        await message.answer("❌ Нельзя чужой номер!")
         return
-
     phone_hash = hash_phone(str(message.contact.phone_number))
     nickname = html.escape(message.from_user.username or "user")
-    
     try:
         async with db_pool.acquire() as conn:
             await conn.execute(
-                """INSERT INTO users (tg_id, nickname, phone_hash, consent_longterm, verified, created_at)
-                   VALUES ($1, $2, $3, 0, 1, $4)
-                   ON CONFLICT (tg_id) DO UPDATE SET
-                   nickname = $2, phone_hash = $3, verified = 1""",
+                "INSERT INTO users (tg_id, nickname, phone_hash, verified, created_at) VALUES ($1, $2, $3, 1, $4) ON CONFLICT (tg_id) DO UPDATE SET nickname=$2, phone_hash=$3, verified=1",
                 message.from_user.id, nickname, phone_hash, datetime.now().isoformat()
             )
     except Exception as e:
-        logger.error(f"DB Error in save_contact: {e}")
-        await message.answer("❌ Произошла ошибка при сохранении данных. Попробуйте позже.")
+        logger.error(f"DB Error: {e}")
+        await message.answer("❌ Ошибка сохранения.")
         return
-
-    await message.answer("✅ Контакт подтверждён! Очки попадут в рейтинг.", reply_markup=types.ReplyKeyboardRemove())
-    await start_game(message, state, verified=True)
+    await message.answer("✅ Подтверждено!", reply_markup=types.ReplyKeyboardRemove())
+    await start_game(message, state, True)
 
 @router.callback_query(F.data == "guest_mode")
 async def guest_start(cb: types.CallbackQuery, state: FSMContext):
-    await cb.message.answer("👤 Вы играете как гость. Прогресс сохранится, но в рейтинг не попадёт.")
-    await start_game(cb.message, state, verified=False)
+    await cb.message.answer("👤 Гостевой режим")
+    await start_game(cb.message, state, False)
 
 async def start_game(message, state: FSMContext, verified: bool):
     try:
         async with db_pool.acquire() as conn:
             tasks = await conn.fetch("SELECT * FROM tasks ORDER BY RANDOM() LIMIT 9")
-        
         await state.update_data({
             "verified": verified,
             "tasks": tasks,
@@ -214,7 +172,6 @@ async def start_game(message, state: FSMContext, verified: bool):
             "start_time": time.time()
         })
         await state.set_state(GameStates.in_game)
-        
         if message.from_user.id in active_games:
             old_task = active_games[message.from_user.id].get("task")
             if old_task and not old_task.done():
@@ -223,46 +180,32 @@ async def start_game(message, state: FSMContext, verified: bool):
                     await old_task
                 except asyncio.CancelledError:
                     pass
-        
         active_games[message.from_user.id] = {"task": None}
-        
         await message.answer("📞 <b>ВХОДЯЩИЙ ВЫЗОВ...</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✅ Принять", callback_data="answer_call")]
         ]))
     except Exception as e:
-        logger.error(f"Error starting game for {message.from_user.id}: {e}")
-        await message.answer("❌ Ошибка при начале игры. Попробуйте /start заново.")
+        logger.error(f"Error: {e}")
+        await message.answer("❌ Ошибка. /start")
 
 @router.callback_query(F.data == "answer_call", GameStates.in_game)
 async def answer_call(cb: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    if not data or "tasks" not in data:
-        await cb.message.answer("❌ Ошибка сессии. Начните заново через /start")
+    if not data or "tasks" not in 
+        await cb.message.answer("❌ Ошибка. /start")
         return
-
     task_text = data["tasks"][0]["text"]
-    
     await cb.message.answer(
-        f"🕵️ <b>Мошенник:</b> Здравствуйте, это служба безопасности. Мы зафиксировали подозрительную операцию...\n\n"
-        f"🎯 <b>ЗАДАНИЕ 1 (Раунд 1):</b> {task_text}\n"
-        f"💡 Вплети это в диалог органично. Если напишешь «в лоб» — мошенник может заподозрить неладное!\n\n"
-        "⏱ Таймер запущен. Пишите ответы сюда. Нажмите 📞 Завершить, когда готовы.",
+        f"🕵️ <b>Мошенник:</b> Здравствуйте...\n\n🎯 <b>ЗАДАНИЕ 1:</b> {task_text}\n💡 Вплети органично!\n⏱ Таймер запущен.",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📞 Завершить звонок", callback_data="end_call")]
+            [InlineKeyboardButton(text="📞 Завершить", callback_data="end_call")]
         ])
     )
-    
     task = asyncio.create_task(scammer_background(cb.message.from_user.id, state))
     active_games[cb.message.from_user.id]["task"] = task
 
 async def scammer_background(user_id: int, state: FSMContext):
-    phrases = [
-        "Не отвлекайтесь, нам нужно подтвердить данные карты.",
-        "Почему вы молчите? Карта будет заблокирована!",
-        "Продиктуйте код из СМС, это срочно.",
-        "Вы меня слушаете? Операция отменится через минуту.",
-        "Не нужно никуда перезванивать, я сейчас на линии."
-    ]
+    phrases = ["Не отвлекайтесь...", "Почему молчите?", "Продиктуйте код...", "Вы слушаете?", "Не перезванивайте..."]
     try:
         while True:
             await asyncio.sleep(random.randint(25, 40))
@@ -273,63 +216,51 @@ async def scammer_background(user_id: int, state: FSMContext):
     except asyncio.CancelledError:
         pass
     except Exception as e:
-        logger.error(f"Error in scammer_background for {user_id}: {e}")
+        logger.error(f"Error: {e}")
 
 @router.message(GameStates.in_game)
 async def handle_game_message(message: types.Message, state: FSMContext):
     data = await state.get_data()
     if not data or "current_task_idx" not in data:
         return
-    
     tasks = data["tasks"]
     idx = data["current_task_idx"]
     if idx >= len(tasks):
         return
-    
     task_row = tasks[idx]
     task_keywords = [w.strip() for w in task_row["keywords"].split(",")]
     mask_words = [w.strip() for w in task_row["mask_words"].split(",")]
-    
     msg_lower = (message.text or "").lower()
     found_keywords = any(kw in msg_lower for kw in task_keywords)
     found_masks = any(mw in msg_lower for mw in mask_words)
-    
     reaction = "neutral" if (found_keywords and found_masks) else ("suspicion" if found_keywords else "ignore")
     await log_analytics("task_attempt", f"user={message.from_user.id}, task={idx}, reaction={reaction}")
-    
     if reaction == "suspicion":
-        await message.answer("🕵️ <b>Мошенник:</b> Так, с вами всё понятно. Ой, ну всё, с вами дальше бесполезно. *сбрасывает звонок*")
-        await finish_game(message, state, forced_end=True)
+        await message.answer("🕵️ <b>Мошенник:</b> Всё понятно. *сброс*")
+        await finish_game(message, state, True)
         return
-    
     if found_keywords:
         await state.update_data({"tasks_done": data["tasks_done"] + 1, "current_task_idx": idx + 1})
         next_idx = idx + 1
         if next_idx < len(tasks):
             round_name = ["Логика", "Актёрство", "Импровизация"][next_idx // 3]
-            await message.answer(
-                f"✅ Задание засчитано!\n\n"
-                f"🎯 <b>ЗАДАНИЕ {next_idx+1} (Раунд {round_name}):</b> {tasks[next_idx]['text']}\n"
-                "💡 Вплети это в диалог органично."
-            )
+            await message.answer(f"✅ Засчитано!\n\n🎯 <b>ЗАДАНИЕ {next_idx+1} ({round_name}):</b> {tasks[next_idx]['text']}\n💡 Вплети органично.")
         else:
-            await message.answer("✅ Все задания выполнены! Нажмите 📞 Завершить, чтобы увидеть результат.")
+            await message.answer("✅ Все задания! Нажмите 📞 Завершить.")
     else:
-        await message.answer("🕵️ <b>Мошенник:</b> Вернёмся к безопасности вашей карты. Не отвлекайтесь.")
+        await message.answer("🕵️ <b>Мошенник:</b> Вернёмся к карте.")
 
 @router.callback_query(F.data == "end_call", GameStates.in_game)
 async def finish_game_cb(cb: types.CallbackQuery, state: FSMContext):
-    await finish_game(cb.message, state, forced_end=False)
+    await finish_game(cb.message, state, False)
 
 async def finish_game(message, state: FSMContext, forced_end=False):
     data = await state.get_data()
-    if not data or "start_time" not in data:
-        await message.answer("❌ Ошибка сессии. Данные потеряны.")
+    if not data or "start_time" not in 
+        await message.answer("❌ Ошибка.")
         return
-
     duration = time.time() - data["start_time"]
     tasks_done = data.get("tasks_done", 0)
-    
     if message.from_user.id in active_games:
         ag = active_games[message.from_user.id]
         if ag["task"] and not ag["task"].done():
@@ -339,14 +270,11 @@ async def finish_game(message, state: FSMContext, forced_end=False):
             except asyncio.CancelledError:
                 pass
         del active_games[message.from_user.id]
-    
     score = 0.0
     in_leaderboard = duration >= 180 and tasks_done > 0
     if in_leaderboard:
         score = duration * 8 * (1 + tasks_done * 0.2)
-    
-    await log_analytics("session_end", f"duration={int(duration)}, tasks={tasks_done}, forced={forced_end}")
-    
+    await log_analytics("session_end", f"duration={int(duration)}, tasks={tasks_done}")
     try:
         async with db_pool.acquire() as conn:
             await conn.execute(
@@ -354,20 +282,17 @@ async def finish_game(message, state: FSMContext, forced_end=False):
                 message.from_user.id, data["start_time"], time.time(), duration, tasks_done, score, "ended"
             )
     except Exception as e:
-        logger.error(f"DB Error saving session for {message.from_user.id}: {e}")
-    
-    text = f"📞 <b>ВЫЗОВ ЗАВЕРШЁН</b>\n⏱ Длительность: {int(duration)} сек\n✅ Выполнено: {tasks_done}/9\n💰 Условно спасено: {int(score)} ₽\n"
-    text += "🏆 <b>Результат попал в лидерборд!</b>\n" if in_leaderboard else "⏱ Разговор <3 мин. Для рейтинга нужно больше времени.\n"
-    
+        logger.error(f"DB Error: {e}")
+    text = f"📞 <b>ВЫЗОВ ЗАВЕРШЁН</b>\n⏱ {int(duration)} сек\n✅ {tasks_done}/9\n💰 {int(score)} ₽\n"
+    text += "🏆 <b>В рейтинг!</b>\n" if in_leaderboard else "⏱ <3 мин\n"
     await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📝 Оставить отзыв", callback_data="feedback_start")]
+        [InlineKeyboardButton(text="📝 Отзыв", callback_data="feedback_start")]
     ]))
     await state.clear()
 
-# ОТЗЫВЫ
 @router.callback_query(F.data == "feedback_start")
 async def req_feedback(cb: types.CallbackQuery, state: FSMContext):
-    await cb.message.answer("Оцените игру от 1 до 5:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+    await cb.message.answer("Оценка 1-5:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=str(i), callback_data=f"fb_{i}") for i in range(1,6)]
     ]))
     await state.set_state(GameStates.waiting_feedback)
@@ -375,29 +300,24 @@ async def req_feedback(cb: types.CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("fb_"), GameStates.waiting_feedback)
 async def save_feedback(cb: types.CallbackQuery, state: FSMContext):
     await state.update_data({"rating": cb.data.split("_")[1]})
-    await cb.message.answer("Напишите комментарий (или отправьте /skip):")
+    await cb.message.answer("Комментарий (/skip):")
 
 @router.message(Command("skip"), GameStates.waiting_feedback)
 @router.message(GameStates.waiting_feedback)
 async def process_feedback(message: types.Message, state: FSMContext):
     data = await state.get_data()
     text = message.text if message.text != "/skip" else "Без комментария"
-    
     safe_text = html.escape(text)
     safe_nick = html.escape(message.from_user.username or "Anon")
-    
-    await log_analytics("feedback", f"user={message.from_user.id}, rating={data.get('rating','?')}, comment={safe_text}")
-    
+    await log_analytics("feedback", f"user={message.from_user.id}, rating={data.get('rating','?')}")
     if ADMIN_ID:
         try: 
             await bot.send_message(ADMIN_ID, f"📝 Отзыв от {safe_nick}:\n⭐ {data.get('rating','?')}\n💬 {safe_text}")
         except Exception as e:
-            logger.error(f"Failed to send feedback to admin: {e}")
-            
-    await message.answer("Спасибо за отзыв!")
+            logger.error(f"Error: {e}")
+    await message.answer("Спасибо!")
     await state.clear()
 
-# ДОП. КОМАНДЫ
 @router.message(Command("rules"))
 async def cmd_rules(m: types.Message): await m.answer(RULES_TEXT)
 @router.message(Command("privacy"))
@@ -411,66 +331,58 @@ async def cmd_delete(m: types.Message):
         async with db_pool.acquire() as conn:
             await conn.execute("DELETE FROM users WHERE tg_id=$1", m.from_user.id)
             await conn.execute("DELETE FROM sessions WHERE tg_id=$1", m.from_user.id)
-        await m.answer("🗑️ Ваши данные удалены.")
+        await m.answer("🗑️ Удалено.")
     except Exception as e:
-        logger.error(f"Error deleting data for {m.from_user.id}: {e}")
-        await m.answer("❌ Ошибка при удалении данных.")
+        logger.error(f"Error: {e}")
+        await m.answer("❌ Ошибка.")
 
 @router.message(Command("leaderboard"))
 async def cmd_leaderboard(m: types.Message):
     try:
         async with db_pool.acquire() as conn:
-            rows = await conn.fetch("""SELECT u.nickname, u.verified, MAX(s.score) as best 
-                         FROM users u JOIN sessions s ON u.tg_id = s.tg_id 
-                         WHERE s.duration >= 180 GROUP BY u.tg_id ORDER BY best DESC LIMIT 10""")
-        
-        if not rows: return await m.answer("🏆 Рейтинг пока пуст.")
-        
-        text = "🏆 <b>ТОП-10 ИГРОКОВ</b>\n"
+            rows = await conn.fetch("SELECT u.nickname, u.verified, MAX(s.score) as best FROM users u JOIN sessions s ON u.tg_id = s.tg_id WHERE s.duration >= 180 GROUP BY u.tg_id ORDER BY best DESC LIMIT 10")
+        if not rows: return await m.answer("🏆 Пусто.")
+        text = "🏆 <b>ТОП-10</b>\n"
         for i, row in enumerate(rows, 1):
             safe_nick = html.escape(row["nickname"] or "Anon")
             text += f"{i}. {safe_nick} {'✅' if row['verified'] else ''} — {int(row['best'])} ₽\n"
         await m.answer(text)
     except Exception as e:
-        logger.error(f"Error fetching leaderboard: {e}")
-        await m.answer("❌ Ошибка при загрузке рейтинга.")
+        logger.error(f"Error: {e}")
+        await m.answer("❌ Ошибка.")
 
 async def log_analytics(event, payload):
     try:
         async with db_pool.acquire() as conn:
             await conn.execute("INSERT INTO analytics (event, payload, created_at) VALUES ($1, $2, $3)", event, payload, datetime.now().isoformat())
     except Exception as e:
-        logger.error(f"Analytics error: {e}")
+        logger.error(f"Error: {e}")
 
-# ГЛАВНАЯ ФУНКЦИЯ ЗАПУСКА
 async def on_startup(app):
     global db_pool
     db_pool = await asyncpg.create_pool(dsn=DATABASE_URL)
     await init_db(db_pool)
-    
     webhook_url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME', 'localhost')}/bot{TOKEN}"
     await bot.set_webhook(webhook_url)
-    logger.info(f"Webhook set to {webhook_url}")
+    logger.info(f"Webhook set: {webhook_url}")
 
 async def on_shutdown(app):
     if db_pool:
         await db_pool.close()
     await bot.delete_webhook()
     await bot.session.close()
-    logger.info("Bot and DB pool closed.")
+    logger.info("Closed.")
 
 if __name__ == "__main__":
-    if not TOKEN or "СЮДА" in TOKEN or "ВСТАВЬ" in TOKEN:
-        print("❌ Ошибка: вставь токен и ADMIN_ID в .env!")
+    if not TOKEN or "СЮДА" in TOKEN:
+        print("❌ Ошибка: токен!")
         exit()
-    if not DATABASE_URL or "postgres://" not in DATABASE_URL:
-        print("❌ Ошибка: DATABASE_URL не настроен!")
+    if not DATABASE_URL:
+        print("❌ Ошибка: DATABASE_URL!")
         exit()
-        
     app = web.Application()
     app.router.add_post(f"/bot{TOKEN}", webhook_handler)
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
-    
-    logger.info("Starting webhook server...")
+    logger.info("Starting...")
     web.run_app(app, host="0.0.0.0", port=PORT)
