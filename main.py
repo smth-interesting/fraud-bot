@@ -5,6 +5,7 @@ import html
 import logging
 import os
 import random
+import re
 import sys
 import time
 from datetime import datetime
@@ -34,7 +35,8 @@ PORT = int(os.getenv("PORT", 8080))
 
 _wp = os.getenv("WEBHOOK_PATH", "telegram-webhook").strip().strip("/")
 WEBHOOK_PATH = f"/{_wp}" if _wp else "/telegram-webhook"
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "").strip()
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "").strip().strip("\"'")
+WEBHOOK_SECRET_RE = re.compile(r"^[A-Za-z0-9_-]{1,256}$")
 
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
@@ -109,7 +111,8 @@ MAIN_KB = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text="🗑 Удалить данные")]
 ], resize_keyboard=True)
 
-@router.message(CommandStart() | F.text == "🎮 Новая игра")
+@router.message(CommandStart())
+@router.message(F.text == "🎮 Новая игра")
 async def cmd_start(msg: types.Message, state: FSMContext):
     await state.clear()
     await msg.answer(DISCLAIMER, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Принимаю условия", callback_data="accept")]]))
@@ -367,6 +370,10 @@ if __name__ == "__main__":
         sys.exit(1)
     if not PHONE_SALT:
         print("❌ Задайте PHONE_SALT в .env (длинная случайная строка, не default_salt).")
+        sys.exit(1)
+    if WEBHOOK_SECRET and not WEBHOOK_SECRET_RE.fullmatch(WEBHOOK_SECRET):
+        print("❌ WEBHOOK_SECRET содержит недопустимые символы.")
+        print("   Разрешены только: A-Z, a-z, 0-9, '_' и '-'. Длина: 1..256.")
         sys.exit(1)
     app = web.Application()
     app.router.add_post(WEBHOOK_PATH, webhook_handler)
