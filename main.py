@@ -347,13 +347,17 @@ async def webhook_handler(req: web.Request):
 
 async def on_startup(app):
     await init_db()
+    me = await bot.get_me()
+    logger.info("🤖 Bot connected: @%s (id=%s)", me.username, me.id)
     host = os.getenv("RENDER_EXTERNAL_HOSTNAME", "").strip()
     if not host:
         host = "localhost"
         logger.warning("RENDER_EXTERNAL_HOSTNAME не задан — в логе показан условный URL; для продакшена задайте хост Render.")
     url = f"https://{host}{WEBHOOK_PATH}"
     await bot.set_webhook(url, secret_token=WEBHOOK_SECRET or None)
-    logger.info("🌐 Webhook: %s (путь без токена; секрет: %s)", url, "да" if WEBHOOK_SECRET else "нет — добавьте WEBHOOK_SECRET в .env")
+    info = await bot.get_webhook_info()
+    logger.info("🌐 Webhook set to: %s (путь без токена; секрет: %s)", url, "да" if WEBHOOK_SECRET else "нет — добавьте WEBHOOK_SECRET в .env")
+    logger.info("📡 Telegram webhook info: url=%s pending_updates=%s last_error=%s", info.url, info.pending_update_count, info.last_error_message or "none")
 
 async def on_shutdown(app):
     if db_pool: await db_pool.close()
