@@ -5,6 +5,7 @@ import html
 import logging
 import os
 import random
+import sys
 import time
 from datetime import datetime
 from dotenv import load_dotenv
@@ -24,9 +25,16 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
-PHONE_SALT = os.getenv("PHONE_SALT", "default_salt").encode()
+_salt_raw = os.getenv("PHONE_SALT", "").strip()
+if _salt_raw == "default_salt":
+    _salt_raw = ""
+PHONE_SALT = _salt_raw.encode() if _salt_raw else None
 DATABASE_URL = os.getenv("DATABASE_URL")
 PORT = int(os.getenv("PORT", 8080))
+
+_wp = os.getenv("WEBHOOK_PATH", "telegram-webhook").strip().strip("/")
+WEBHOOK_PATH = f"/{_wp}" if _wp else "/telegram-webhook"
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "").strip()
 
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
@@ -51,6 +59,8 @@ class ThrottlingMiddleware:
 dp.update.middleware(ThrottlingMiddleware())
 
 def hash_phone(phone):
+    if not PHONE_SALT:
+        raise RuntimeError("PHONE_SALT не задан в окружении")
     return hmac.new(PHONE_SALT, phone.encode(), hashlib.sha256).hexdigest()
 
 async def init_db():
@@ -64,15 +74,15 @@ async def init_db():
         row = await conn.fetchrow("SELECT COUNT(*) as cnt FROM tasks")
         if row["cnt"] == 0:
             await conn.executemany("INSERT INTO tasks (round_num, text, keywords, mask_words) VALUES ($1, $2, $3, $4)", [
-                (1, 1, "2+2=? Скажи ответ в разговоре", "два, четыре, 4", "кстати, между прочим"),
-                (2, 1, "Назови три любых цвета радуги", "красный, оранжевый, жёлтый, синий", "например, вообще"),
-                (3, 1, "Назови столицу России", "москва", "кстати, а где"),
-                (4, 2, "Напиши фразу только ЗАГЛАВНЫМИ БУКВАМИ", "ВЕРХНИЙ РЕГИСТР", "послушайте, зачем"),
-                (5, 2, "Сделай вид, что обиделся на мошенника", "обида, ладно, понял", "ну хорошо, извините"),
-                (6, 2, "Ответь максимально коротко (1–3 слова)", "да, нет, ок", "тише, шёпотом"),
-                (7, 3, "Крякни 5 раз", "кря, утка, кряк", "ребёнок, фон"),
-                (8, 3, "Спроси: «А вы любите ананасы на пицце?»", "ананас, пицца", "кстати, вопрос"),
-                (9, 3, "Вставь строчку из любой детской песенки", "чунга, кузнечик", "напеваю, детство")
+                (1, "2+2=? Скажи ответ в разговоре", "два, четыре, 4", "кстати, между прочим"),
+                (1, "Назови три любых цвета радуги", "красный, оранжевый, жёлтый, синий", "например, вообще"),
+                (1, "Назови столицу России", "москва", "кстати, а где"),
+                (2, "Напиши фразу только ЗАГЛАВНЫМИ БУКВАМИ", "ВЕРХНИЙ РЕГИСТР", "послушайте, зачем"),
+                (2, "Сделай вид, что обиделся на мошенника", "обида, ладно, понял", "ну хорошо, извините"),
+                (2, "Ответь максимально коротко (1–3 слова)", "да, нет, ок", "тише, шёпотом"),
+                (3, "Крякни 5 раз", "кря, утка, кряк", "ребёнок, фон"),
+                (3, "Спроси: «А вы любите ананасы на пицце?»", "ананас, пицца", "кстати, вопрос"),
+                (3, "Вставь строчку из любой детской песенки", "чунга, кузнечик", "напеваю, детство")
             ])
     logger.info("✅ DB ready")
 
@@ -215,6 +225,7 @@ async def finish_game(msg, state: FSMContext, forced: bool):
         return await msg.answer("❌ Ошибка.", reply_markup=MAIN_KB)
     dur = time.time() - data["start"]
     done = data.get("done", 0)
+    verified = data.get("verified", False)
     if msg.from_user.id in active_tasks:
         t = active_tasks[msg.from_user.id]
         if t and not t.done(): t.cancel()
@@ -227,7 +238,14 @@ async def finish_game(msg, state: FSMContext, forced: bool):
             await conn.execute("INSERT INTO sessions (tg_id, start_time, end_time, duration, tasks_done, score, status) VALUES ($1, $2, $3, $4, $5, $6, $7)", msg.from_user.id, data["start"], time.time(), dur, done, score, "ended")
     except Exception as e: logger.error(f"Session: {e}")
     txt = f"📞 <b>ВЫЗОВ ЗАВЕРШЁН</b>\n⏱ {int(dur)} сек\n✅ {done}/9\n💰 {int(score)} ₽\n"
-    txt += "🏆 <b>В рейтинг!</b>\n" if score > 0 else "⏱ <3 мин\n"
+    if score > 0 and verified:
+        txt += "🏆 <b>В рейтинг!</b>\n"
+    elif score > 0 and not verified:
+        txt += "💡 Гостевой режим — в таблицу лидеров очки не идут.\n"
+    elif done > 0:
+        txt += "⏱ Меньше 3 мин — очки за сессию не начислены.\n"
+    else:
+        txt += "⏱ Задания не засчитаны или сессия короткая.\n"
     await msg.answer(txt, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📝 Отзыв", callback_data="fb")], [InlineKeyboardButton(text="🔙 Меню", callback_data="menu")]]))
     await state.clear()
 
@@ -248,11 +266,13 @@ async def save_rating(cb: types.CallbackQuery, state: FSMContext):
 async def process_fb(msg: types.Message, state: FSMContext):
     data = await state.get_data()
     txt = msg.text if msg.text != "/skip" else "Без комментария"
-    safe_t = html.escape(txt)
+    safe_t = html.escape(txt[:3500])
     safe_n = html.escape(msg.from_user.username or "Anon")
     if ADMIN_ID:
-        try: await bot.send_message(ADMIN_ID, f"📝 {safe_n}: ⭐{data.get('rating','?')}\n💬{safe_t}")
-        except: pass
+        try:
+            await bot.send_message(ADMIN_ID, f"📝 {safe_n}: ⭐{data.get('rating','?')}\n💬{safe_t}")
+        except Exception as e:
+            logger.warning("Не удалось отправить отзыв админу: %s", e)
     await msg.answer("Спасибо!", reply_markup=MAIN_KB)
     await state.clear()
 
@@ -313,6 +333,9 @@ async def cmd_help(m: types.Message): await m.answer(HELP, reply_markup=MAIN_KB)
 
 async def webhook_handler(req: web.Request):
     try:
+        if WEBHOOK_SECRET:
+            if req.headers.get("X-Telegram-Bot-Api-Secret-Token") != WEBHOOK_SECRET:
+                return web.Response(status=403)
         await dp.feed_update(bot, types.Update(**await req.json()))
         return web.Response()
     except Exception as e:
@@ -321,9 +344,13 @@ async def webhook_handler(req: web.Request):
 
 async def on_startup(app):
     await init_db()
-    url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME', 'localhost')}/bot{TOKEN}"
-    await bot.set_webhook(url)
-    logger.info(f"🌐 WH: {url}")
+    host = os.getenv("RENDER_EXTERNAL_HOSTNAME", "").strip()
+    if not host:
+        host = "localhost"
+        logger.warning("RENDER_EXTERNAL_HOSTNAME не задан — в логе показан условный URL; для продакшена задайте хост Render.")
+    url = f"https://{host}{WEBHOOK_PATH}"
+    await bot.set_webhook(url, secret_token=WEBHOOK_SECRET or None)
+    logger.info("🌐 Webhook: %s (путь без токена; секрет: %s)", url, "да" if WEBHOOK_SECRET else "нет — добавьте WEBHOOK_SECRET в .env")
 
 async def on_shutdown(app):
     if db_pool: await db_pool.close()
@@ -334,12 +361,15 @@ async def on_shutdown(app):
 if __name__ == "__main__":
     if not TOKEN or "СЮДА" in TOKEN:
         print("❌ TOKEN!")
-        exit()
+        sys.exit(1)
     if not DATABASE_URL:
         print("❌ DATABASE_URL!")
-        exit()
+        sys.exit(1)
+    if not PHONE_SALT:
+        print("❌ Задайте PHONE_SALT в .env (длинная случайная строка, не default_salt).")
+        sys.exit(1)
     app = web.Application()
-    app.router.add_post(f"/bot{TOKEN}", webhook_handler)
+    app.router.add_post(WEBHOOK_PATH, webhook_handler)
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
     logger.info("🚀 Start")

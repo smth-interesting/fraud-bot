@@ -1,9 +1,12 @@
+# Render Blueprint: секреты задаются в Dashboard → Environment (не храните их в git).
+# Обязательно: BOT_TOKEN, DATABASE_URL, ADMIN_ID, PHONE_SALT
+# Рекомендуется: WEBHOOK_SECRET (защита URL вебхука от посторонних POST)
+# При необходимости: WEBHOOK_PATH (путь без ведущего /; по умолчанию в коде telegram-webhook → /telegram-webhook)
+# Порт: Render обычно задаёт PORT сам; локально можно задать в .env
+
 services:
   - type: web
     name: fraud-roulette-bot
     env: python
     buildCommand: pip install -r requirements.txt
     startCommand: python main.py
-    envVars:
-      - key: MODE
-        value: text
