@@ -76,21 +76,57 @@ async def init_db():
     db_pool = await asyncpg.create_pool(DATABASE_URL)
     async with db_pool.acquire() as conn:
         await conn.execute("CREATE TABLE IF NOT EXISTS users (tg_id BIGINT PRIMARY KEY, nickname TEXT, phone_hash TEXT, verified INT DEFAULT 0, created_at TEXT)")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS accepted_terms INT DEFAULT 0")
         await conn.execute("CREATE TABLE IF NOT EXISTS tasks (id SERIAL PRIMARY KEY, round_num INT, text TEXT, keywords TEXT, mask_words TEXT)")
         await conn.execute("CREATE TABLE IF NOT EXISTS sessions (id SERIAL PRIMARY KEY, tg_id BIGINT, start_time FLOAT, end_time FLOAT, duration FLOAT, tasks_done INT, score FLOAT, status TEXT)")
         await conn.execute("CREATE TABLE IF NOT EXISTS analytics (id SERIAL PRIMARY KEY, event TEXT, payload TEXT, created_at TEXT)")
+        await conn.execute(
+            """CREATE TABLE IF NOT EXISTS feedback (
+                id SERIAL PRIMARY KEY,
+                tg_id BIGINT,
+                username TEXT,
+                rating INT,
+                comment TEXT,
+                created_at TEXT
+            )"""
+        )
+        await conn.execute(
+            "UPDATE tasks SET text = $1 WHERE round_num = 2 AND text LIKE $2 AND text NOT LIKE $3",
+            "Напиши фразу только ЗАГЛАВНЫМИ БУКВАМИ, имитируя крик.",
+            "%ЗАГЛАВНЫМИ БУКВАМИ%",
+            "%имитируя%",
+        )
+        await conn.execute(
+            "UPDATE tasks SET text = $1 WHERE round_num = 2 AND text LIKE $2 AND text LIKE $3 AND text NOT LIKE $4",
+            "Ответь максимально коротко (1–3 слова), будто боишься, что рядом кто-то слышит.",
+            "%Ответь максимально коротко%",
+            "%1–3 слова%",
+            "%боишься%",
+        )
+        await conn.execute(
+            "UPDATE tasks SET text = $1 WHERE round_num = 3 AND text LIKE $2 AND text LIKE $3 AND text LIKE $4",
+            "Спроси у мошенника: «А вы любите ананасы на пицце?»",
+            "%Спроси%",
+            "%ананасы%",
+            "%пицце%",
+        )
+        await conn.execute(
+            "UPDATE tasks SET text = $1 WHERE round_num = 3 AND text LIKE $2",
+            "Вставь в сообщение строчку из любой детской песенки",
+            "%детской песенки%",
+        )
         row = await conn.fetchrow("SELECT COUNT(*) as cnt FROM tasks")
         if row["cnt"] == 0:
             await conn.executemany("INSERT INTO tasks (round_num, text, keywords, mask_words) VALUES ($1, $2, $3, $4)", [
                 (1, "2+2=? Скажи ответ в разговоре", "два, четыре, 4", "кстати, между прочим"),
-                (1, "Назови три любых цвета радуги", "красный, оранжевый, жёлтый, синий", "например, вообще"),
+                (1, "Назови три любых цвета радуги", "красный, оранжевый, жёлтый, зелёный, голубой, синий, фиолетовый", "например, вообще"),
                 (1, "Назови столицу России", "москва", "кстати, а где"),
-                (2, "Напиши фразу только ЗАГЛАВНЫМИ БУКВАМИ", "ВЕРХНИЙ РЕГИСТР", "послушайте, зачем"),
+                (2, "Напиши фразу только ЗАГЛАВНЫМИ БУКВАМИ, имитируя крик.", "ВЕРХНИЙ РЕГИСТР", "послушайте, зачем"),
                 (2, "Сделай вид, что обиделся на мошенника", "обида, ладно, понял", "ну хорошо, извините"),
-                (2, "Ответь максимально коротко (1–3 слова)", "да, нет, ок", "тише, шёпотом"),
+                (2, "Ответь максимально коротко (1–3 слова), будто боишься, что рядом кто-то слышит.", "да, нет, ок", "тише, шёпотом"),
                 (3, "Крякни 5 раз", "кря, утка, кряк", "ребёнок, фон"),
-                (3, "Спроси: «А вы любите ананасы на пицце?»", "ананас, пицца", "кстати, вопрос"),
-                (3, "Вставь строчку из любой детской песенки", "чунга, кузнечик", "напеваю, детство")
+                (3, "Спроси у мошенника: «А вы любите ананасы на пицце?»", "ананас, пицца", "кстати, вопрос"),
+                (3, "Вставь в сообщение строчку из любой детской песенки", "чунга, кузнечик", "напеваю, детство")
             ])
     logger.info("✅ DB ready")
 
@@ -105,12 +141,137 @@ DISCLAIMER = (
 RULES = "📖 <b>КАК ВЫПОЛНЯТЬ ЗАДАНИЯ:</b>\nТвоя цель — вплетать задания в диалог <b>органично</b>.\n✅ Хорошо: «Кстати, а какой цвет у радуги первый? Красный...»\n❌ Плохо: «Красный оранжевый (выполняю задание)»\n💡 Мошенник реагирует на ключевые слова. ⏱ Минимум 3 мин для рейтинга."
 PRIVACY = "🔒 <b>Политика:</b>\n1. Собираем Telegram ID, ник и хэш телефона.\n2. Номер не передаётся третьим лицам.\n3. Удаляйте данные командой /delete_data."
 TERMS = "📜 <b>Правила:</b>\n1. 16+\n2. Запрещён спам и мошенничество.\n3. Бот «как есть».\n4. Играя, вы соглашаетесь с правилами."
-HELP = "📚 <b>Команды:</b>\n/start - Меню\n/rules - Правила игры\n/privacy - Конфиденциальность\n/terms - Условия\n/leaderboard - Рейтинг\n/delete_data - Удалить данные\n/help - Это сообщение"
+HELP = (
+    "📚 <b>Команды:</b>\n/start — вход\n/rules — правила игры\n/privacy — конфиденциальность\n/terms — условия\n"
+    "/leaderboard — рейтинг\n/delete_data — удалить свои данные\n/my_data_status — что хранится обо мне\n"
+    "/reviews — последние отзывы (только админ)\n"
+    "/admin_data_status &lt;tg_id&gt; — данные пользователя (только админ)\n/help — это сообщение"
+)
 CONTACT_HINT = "📱 Нажмите «📤 Поделиться контактом», чтобы подтвердить номер и попасть в рейтинг."
 
 class GameStates(StatesGroup):
+    choosing_mode = State()
+    ready_for_game = State()
+    waiting_contact = State()
+    waiting_call = State()
     in_game = State()
     waiting_feedback = State()
+
+# Цвета радуги (допускаем жёлтый/желтый, зелёный/зеленый)
+RAINBOW_COLORS = frozenset({
+    "красный", "оранжевый", "жёлтый", "желтый", "зелёный", "зеленый",
+    "голубой", "синий", "фиолетовый",
+})
+
+SONG_SNIPPETS = (
+    "в траве сидел кузнечик", "от улыбки", "пусть бегут неуклюже", "голубой вагон",
+    "чунга-чанга", "чунга чанга", "пусть всегда будет солнце", "я на солнышке лежу",
+    "тише малышка", "ладушки", "раз два три", "пять котят", "жили у бабуси",
+)
+
+OFFENDED_MARKERS = (
+    "обидно", "неприятно", "зачем так", "ну спасибо", "мне это не нравится",
+    "грубо", "обидел", "обидно было", "странно звучит", "вежливее",
+)
+
+PIZZA_PHRASE = "а вы любите ананасы на пицце"
+
+
+def _wc(text: str) -> int:
+    return len([w for w in (text or "").split() if w])
+
+
+def _organic_long(text: str, min_words: int = 4) -> bool:
+    return _wc(text) >= min_words
+
+
+def _task_passes(t: dict, raw: str) -> bool:
+    """Строгая проверка: смысл + органичность (где применимо)."""
+    low = (raw or "").lower().replace("ё", "е")
+    tx = (t.get("text") or "").lower()
+
+    if "2+2" in tx or "2+2" in low:
+        ok_num = bool(re.search(r"\b4\b", low)) or "четыре" in low
+        if not ok_num:
+            return False
+        if _wc(raw.strip()) < 2:
+            return False
+        only = raw.strip().lower().replace(" ", "")
+        if only in ("4", "четыре"):
+            return False
+        return True
+
+    if "три любых цвета" in tx or "цвета радуги" in tx:
+        words = re.findall(r"[а-яёa-z]+", low)
+        found = {w for w in words if w in RAINBOW_COLORS}
+        if len(found) < 3:
+            return False
+        if _wc(raw) < 4:
+            return False
+        return True
+
+    if "столицу россии" in tx:
+        if "москва" not in low:
+            return False
+        if _wc(raw.strip()) < 2:
+            return False
+        return True
+
+    if "имитируя крик" in tx or ("заглавными" in tx and "крик" in tx):
+        s = raw or ""
+        letters = [c for c in s if c.isalpha()]
+        if len(letters) < 8:
+            return False
+        up = sum(1 for c in letters if c.isupper())
+        if up / len(letters) < 0.85:
+            return False
+        if _wc(s) < 2:
+            return False
+        return True
+
+    if "обиделся" in tx:
+        if _wc(raw) < 3:
+            return False
+        if not any(m in low for m in OFFENDED_MARKERS):
+            return False
+        return True
+
+    if "боишься" in tx and "слышит" in tx:
+        w = _wc(raw.strip())
+        if w < 1 or w > 3:
+            return False
+        return True
+
+    if "крякни" in tx:
+        if low.count("кря") < 5:
+            return False
+        if _wc(raw) <= 5:
+            return False
+        return True
+
+    if "ананасы" in tx and "пицце" in tx:
+        if PIZZA_PHRASE.replace("ё", "е") not in low:
+            return False
+        if _wc(raw.strip()) <= _wc(PIZZA_PHRASE) + 1:
+            return False
+        return True
+
+    if "песенки" in tx or "песенк" in tx:
+        hit = any(sn in low for sn in SONG_SNIPPETS)
+        if not hit:
+            return False
+        if _wc(raw.strip()) < 4:
+            return False
+        for sn in SONG_SNIPPETS:
+            if sn in low and raw.strip().lower().strip() == sn:
+                return False
+        return True
+
+    # Fallback по keywords из БД (если текст задания меняли вручную)
+    kws = [x.strip().lower() for x in (t.get("keywords") or "").split(",") if x.strip()]
+    if kws and any(k in low for k in kws):
+        return _organic_long(raw, 3)
+    return False
 
 MAIN_KB = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text="🎮 Новая игра"), KeyboardButton(text="🏆 Рейтинг")],
@@ -119,26 +280,60 @@ MAIN_KB = ReplyKeyboardMarkup(keyboard=[
 ], resize_keyboard=True)
 
 @router.message(CommandStart())
-@router.message(F.text == "🎮 Новая игра")
 async def cmd_start(msg: types.Message, state: FSMContext):
     await state.clear()
+    try:
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT accepted_terms FROM users WHERE tg_id=$1", msg.from_user.id)
+    except Exception as e:
+        logger.error("cmd_start DB: %s", e)
+        return await msg.answer("❌ Ошибка базы. Попробуйте позже.")
+    if row and row["accepted_terms"]:
+        await msg.answer(
+            "👋 С возвращением! Нажми <b>🎮 Новая игра</b>, чтобы увидеть правила и начать вызов.",
+            reply_markup=MAIN_KB,
+        )
+        return
     await msg.answer(DISCLAIMER, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Принимаю условия", callback_data="accept")]]))
 
 @router.callback_query(F.data == "accept")
 async def accept(cb: types.CallbackQuery, state: FSMContext):
-    await cb.message.answer(" <b>Как играть:</b>\nТы ведёшь диалог с «мошенником» и получаешь задания. Вплетаи их в разговор органично.\n\n👇 Выбери режим:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📱 С регистрацией", callback_data="reg")],
-        [InlineKeyboardButton(text="👤 Гостевой режим", callback_data="guest")]
-    ]))
+    nick = html.escape(cb.from_user.username or "user")
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO users (tg_id, nickname, accepted_terms, created_at)
+                   VALUES ($1, $2, 1, $3)
+                   ON CONFLICT (tg_id) DO UPDATE SET accepted_terms = 1, nickname = $2""",
+                cb.from_user.id,
+                nick,
+                datetime.now().isoformat(),
+            )
+    except Exception as e:
+        logger.error("accept DB: %s", e)
+        await cb.answer("Ошибка сохранения.", show_alert=True)
+        return
+    await state.set_state(GameStates.choosing_mode)
+    await cb.message.answer(
+        "ℹ️ <b>Как играть:</b>\nТы ведёшь диалог с «мошенником» и получаешь задания. Вплетай их в разговор органично.\n\n👇 Выбери режим:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📱 С регистрацией", callback_data="reg")],
+            [InlineKeyboardButton(text="👤 Гостевой режим", callback_data="guest")],
+        ]),
+    )
     await cb.answer()
+
+@router.message(GameStates.choosing_mode)
+async def choosing_mode_hint(msg: types.Message):
+    await msg.answer("👇 Сначала выбери режим кнопками выше: «📱 С регистрацией» или «👤 Гостевой режим».")
 
 @router.callback_query(F.data == "reg")
 async def req_contact(cb: types.CallbackQuery, state: FSMContext):
     await cb.message.answer("📱 Для рейтинга подтвердите номер:", reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📤 Поделиться контактом", request_contact=True)]], resize_keyboard=True, one_time_keyboard=True))
-    await state.set_state(GameStates.in_game)
+    await state.set_state(GameStates.waiting_contact)
     await cb.answer()
 
-@router.message(GameStates.in_game, F.contact)
+@router.message(GameStates.waiting_contact, F.contact)
 async def save_contact(msg: types.Message, state: FSMContext):
     if msg.contact.user_id != msg.from_user.id:
         return await msg.answer("❌ Нельзя чужой номер!", reply_markup=MAIN_KB)
@@ -146,25 +341,94 @@ async def save_contact(msg: types.Message, state: FSMContext):
     nick = html.escape(msg.from_user.username or "user")
     try:
         async with db_pool.acquire() as conn:
-            await conn.execute("INSERT INTO users (tg_id, nickname, phone_hash, verified, created_at) VALUES ($1, $2, $3, 1, $4) ON CONFLICT (tg_id) DO UPDATE SET nickname=$2, verified=1", msg.from_user.id, nick, ph, datetime.now().isoformat())
+            await conn.execute(
+                "INSERT INTO users (tg_id, nickname, phone_hash, verified, accepted_terms, created_at) VALUES ($1, $2, $3, 1, 1, $4) ON CONFLICT (tg_id) DO UPDATE SET nickname=$2, verified=1, accepted_terms=1",
+                msg.from_user.id,
+                nick,
+                ph,
+                datetime.now().isoformat(),
+            )
     except Exception as e:
         logger.error(f"DB: {e}")
         return await msg.answer("❌ Ошибка.", reply_markup=MAIN_KB)
-    await msg.answer("✅ Подтверждено!", reply_markup=MAIN_KB)
-    await start_game(msg, state, True)
+    await msg.answer("✅ Подтверждено! Нажми 🎮 Новая игра — покажу правила и можно начинать вызов.", reply_markup=MAIN_KB)
+    await state.set_state(GameStates.ready_for_game)
+
+@router.message(GameStates.waiting_contact)
+async def waiting_contact_hint(msg: types.Message):
+    await msg.answer(CONTACT_HINT, reply_markup=MAIN_KB)
 
 @router.callback_query(F.data == "guest")
 async def guest_start(cb: types.CallbackQuery, state: FSMContext):
-    await cb.message.answer("👤 Гостевой режим. Прогресс сохранится, но в рейтинг не попадёт.", reply_markup=MAIN_KB)
-    await start_game(cb.message, state, False)
+    await state.set_state(GameStates.ready_for_game)
+    await cb.message.answer(
+        "👤 Гостевой режим. Прогресс сохранится, но в рейтинг не попадёт.\n\nНажми 🎮 Новая игра — правила и старт вызова.",
+        reply_markup=MAIN_KB,
+    )
     await cb.answer()
+
+@router.message(F.text == "🎮 Новая игра")
+async def new_game_from_menu(msg: types.Message, state: FSMContext):
+    st = await state.get_state()
+    if st in (GameStates.in_game, GameStates.waiting_call, GameStates.waiting_feedback):
+        return await msg.answer("Сначала завершите текущую сессию (📞 Завершить) или дождитесь конца отзыва.")
+    if st == GameStates.waiting_contact:
+        return await msg.answer(CONTACT_HINT, reply_markup=MAIN_KB)
+    if st == GameStates.choosing_mode:
+        return await msg.answer("Сначала выбери режим кнопками выше.")
+    try:
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT accepted_terms FROM users WHERE tg_id=$1", msg.from_user.id)
+    except Exception as e:
+        logger.error("new_game DB: %s", e)
+        return await msg.answer("❌ Ошибка базы.")
+    if not row or not row["accepted_terms"]:
+        return await msg.answer("Сначала открой /start и прими условия.")
+    await msg.answer(
+        RULES,
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="📞 Начать вызов", callback_data="rules_begin")]]
+        ),
+    )
+
+@router.callback_query(F.data == "rules_begin")
+async def rules_begin(cb: types.CallbackQuery, state: FSMContext):
+    try:
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT verified FROM users WHERE tg_id=$1", cb.from_user.id)
+    except Exception as e:
+        logger.error("rules_begin DB: %s", e)
+        await cb.answer("Ошибка.", show_alert=True)
+        return
+    verified = bool(row and row["verified"])
+    await start_game(cb.message, state, verified)
+    await cb.answer()
+
+@router.message(GameStates.ready_for_game, F.text != "🎮 Новая игра")
+async def ready_for_game_hint(msg: types.Message):
+    await msg.answer("Нажми 🎮 Новая игра — я покажу правила и кнопку «📞 Начать вызов».", reply_markup=MAIN_KB)
 
 async def start_game(msg, state: FSMContext, verified: bool):
     try:
         async with db_pool.acquire() as conn:
-            tasks = await conn.fetch("SELECT * FROM tasks ORDER BY RANDOM() LIMIT 9")
+            tasks = await conn.fetch(
+                """
+                SELECT * FROM (
+                    SELECT * FROM tasks WHERE round_num = 1 ORDER BY RANDOM() LIMIT 3
+                ) r1
+                UNION ALL
+                SELECT * FROM (
+                    SELECT * FROM tasks WHERE round_num = 2 ORDER BY RANDOM() LIMIT 3
+                ) r2
+                UNION ALL
+                SELECT * FROM (
+                    SELECT * FROM tasks WHERE round_num = 3 ORDER BY RANDOM() LIMIT 3
+                ) r3
+                ORDER BY round_num, id
+                """
+            )
         await state.update_data(verified=verified, tasks=tasks, idx=0, done=0, start=time.time())
-        await state.set_state(GameStates.in_game)
+        await state.set_state(GameStates.waiting_call)
         if msg.from_user.id in active_tasks:
             t = active_tasks[msg.from_user.id]
             if t and not t.done(): t.cancel()
@@ -175,16 +439,21 @@ async def start_game(msg, state: FSMContext, verified: bool):
         logger.error(f"Start: {e}")
         await msg.answer("❌ Ошибка. /start", reply_markup=MAIN_KB)
 
-@router.callback_query(F.data == "call", GameStates.in_game)
+@router.callback_query(F.data == "call", GameStates.waiting_call)
 async def answer_call(cb: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     if not data or "tasks" not in data:
         return await cb.message.answer("❌ Ошибка. /start")
+    await state.set_state(GameStates.in_game)
     t = data["tasks"][0]
     rn = ["Логика", "Актёрство", "Импровизация"][t["round_num"]-1]
     await cb.message.answer(f"🕵️ <b>Мошенник:</b> Здравствуйте, это служба безопасности...\n\n🎯 <b>ЗАДАНИЕ 1 (Раунд: {rn})</b>\n📝 {t['text']}\n💡 Вплети в диалог органично!\n⏱ Таймер запущен.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📞 Завершить", callback_data="end")]]))
     active_tasks[cb.from_user.id] = asyncio.create_task(scammer_bg(cb.from_user.id, state))
     await cb.answer()
+
+@router.message(GameStates.waiting_call)
+async def waiting_call_hint(msg: types.Message):
+    await msg.answer("☎️ Чтобы начать диалог, нажмите кнопку «✅ Принять вызов».", reply_markup=MAIN_KB)
 
 async def scammer_bg(uid, state: FSMContext):
     phrases = ["Не отвлекайтесь, нужно подтвердить данные.", "Почему молчите? Карта блокируется!", "Продиктуйте код из СМС, срочно.", "Вы слушаете? Операция отменяется.", "Не перезванивайте, я на линии."]
@@ -201,27 +470,21 @@ async def scammer_bg(uid, state: FSMContext):
 async def handle_msg(msg: types.Message, state: FSMContext):
     data = await state.get_data()
     if not data or "tasks" not in data:
-        return await msg.answer(CONTACT_HINT)
+        return await msg.answer("❌ Нет активной сессии. Нажми 🎮 Новая игра.", reply_markup=MAIN_KB)
     if "idx" not in data:
         return
     tasks = data["tasks"]
     idx = data["idx"]
     if idx >= len(tasks): return
     t = tasks[idx]
-    kws = [w.strip() for w in t["keywords"].split(",")]
-    masks = [w.strip() for w in t["mask_words"].split(",")]
-    txt = (msg.text or "").lower()
-    kw_ok = any(k in txt for k in kws)
-    m_ok = any(m in txt for m in masks)
-    if kw_ok and not m_ok:
-        await msg.answer("🕵️ <b>Мошенник:</b> Подозрительно... *сброс*")
-        await finish_game(msg, state, True)
-        return
-    if kw_ok:
-        await state.update_data(done=data["done"]+1, idx=idx+1)
-        if idx+1 < len(tasks):
-            rn = ["Логика", "Актёрство", "Импровизация"][tasks[idx+1]["round_num"]-1]
-            await msg.answer(f"✅ Засчитано!\n\n🎯 <b>ЗАДАНИЕ {idx+2} ({rn})</b>\n📝 {tasks[idx+1]['text']}\n💡 Вплети органично.")
+    raw = msg.text or ""
+    if _task_passes(t, raw):
+        await state.update_data(done=data["done"] + 1, idx=idx + 1)
+        if idx + 1 < len(tasks):
+            rn = ["Логика", "Актёрство", "Импровизация"][tasks[idx + 1]["round_num"] - 1]
+            await msg.answer(
+                f"✅ Засчитано!\n\n🎯 <b>ЗАДАНИЕ {idx + 2} ({rn})</b>\n📝 {tasks[idx + 1]['text']}\n💡 Вплети органично."
+            )
         else:
             await msg.answer("✅ Все задания! Нажми 📞 Завершить.")
     else:
@@ -284,6 +547,22 @@ async def process_fb(msg: types.Message, state: FSMContext):
         txt = "Без комментария (не текстовый ответ)"
     safe_t = html.escape(txt[:3500])
     safe_n = html.escape(msg.from_user.username or "Anon")
+    try:
+        rt = int(data.get("rating") or 0)
+    except (TypeError, ValueError):
+        rt = 0
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO feedback (tg_id, username, rating, comment, created_at) VALUES ($1, $2, $3, $4, $5)",
+                msg.from_user.id,
+                msg.from_user.username or "",
+                rt,
+                txt[:4000],
+                datetime.now().isoformat(),
+            )
+    except Exception as e:
+        logger.error("feedback insert: %s", e)
     if ADMIN_ID:
         try:
             await bot.send_message(ADMIN_ID, f"📝 {safe_n}: ⭐{data.get('rating','?')}\n💬{safe_t}")
@@ -322,6 +601,7 @@ async def cmd_del(m: types.Message, state: FSMContext):
     await state.clear()
     try:
         async with db_pool.acquire() as conn:
+            await conn.execute("DELETE FROM feedback WHERE tg_id=$1", m.from_user.id)
             await conn.execute("DELETE FROM users WHERE tg_id=$1", m.from_user.id)
             await conn.execute("DELETE FROM sessions WHERE tg_id=$1", m.from_user.id)
         await m.answer("🗑️ Удалено.", reply_markup=MAIN_KB)
@@ -343,6 +623,102 @@ async def cmd_lb(m: types.Message):
     except Exception as e:
         logger.error(f"LB: {e}")
         await m.answer("❌ Ошибка.", reply_markup=MAIN_KB)
+
+@router.message(Command("my_data_status"))
+async def cmd_my_data_status(m: types.Message):
+    uid = m.from_user.id
+    try:
+        async with db_pool.acquire() as conn:
+            u = await conn.fetchrow(
+                "SELECT tg_id, nickname, verified, accepted_terms, phone_hash IS NOT NULL AS has_phone FROM users WHERE tg_id=$1",
+                uid,
+            )
+            sc = await conn.fetchval("SELECT COUNT(*) FROM sessions WHERE tg_id=$1", uid)
+            fb = await conn.fetchval("SELECT COUNT(*) FROM feedback WHERE tg_id=$1", uid)
+    except Exception as e:
+        logger.error("my_data_status: %s", e)
+        return await m.answer("❌ Ошибка базы.", reply_markup=MAIN_KB)
+    if not u:
+        txt = (
+            f"📋 <b>Ваши данные в базе</b>\n"
+            f"tg_id: <code>{uid}</code>\n"
+            f"Профиль в таблице users: нет записи\n"
+            f"Сессий: {sc or 0}\n"
+            f"Отзывов сохранено: {fb or 0}\n"
+        )
+    else:
+        txt = (
+            f"📋 <b>Ваши данные в базе</b>\n"
+            f"tg_id: <code>{uid}</code>\n"
+            f"Ник в базе: {html.escape(u['nickname'] or '')}\n"
+            f"Подтверждён телефон (рейтинг): {'да' if u['verified'] else 'нет'}\n"
+            f"Условия приняты: {'да' if u['accepted_terms'] else 'нет'}\n"
+            f"Сессий игр: {sc or 0}\n"
+            f"Отзывов сохранено: {fb or 0}\n"
+        )
+    await m.answer(txt, reply_markup=MAIN_KB)
+
+@router.message(Command("admin_data_status"))
+async def cmd_admin_data_status(m: types.Message):
+    if not ADMIN_ID or m.from_user.id != ADMIN_ID:
+        return await m.answer("Команда доступна только администратору.", reply_markup=MAIN_KB)
+    parts = (m.text or "").split()
+    if len(parts) < 2:
+        return await m.answer("Формат: /admin_data_status &lt;tg_id&gt;", reply_markup=MAIN_KB)
+    try:
+        tid = int(parts[1])
+    except ValueError:
+        return await m.answer("tg_id должен быть числом.", reply_markup=MAIN_KB)
+    try:
+        async with db_pool.acquire() as conn:
+            u = await conn.fetchrow(
+                "SELECT tg_id, nickname, verified, accepted_terms, phone_hash IS NOT NULL AS has_phone FROM users WHERE tg_id=$1",
+                tid,
+            )
+            sc = await conn.fetchval("SELECT COUNT(*) FROM sessions WHERE tg_id=$1", tid)
+            fb = await conn.fetchval("SELECT COUNT(*) FROM feedback WHERE tg_id=$1", tid)
+    except Exception as e:
+        logger.error("admin_data_status: %s", e)
+        return await m.answer("❌ Ошибка базы.", reply_markup=MAIN_KB)
+    if not u:
+        await m.answer(
+            f"Пользователь <code>{tid}</code>: записи в users нет.\nСессий: {sc or 0}, отзывов: {fb or 0}.",
+            reply_markup=MAIN_KB,
+        )
+        return
+    await m.answer(
+        f"👤 <code>{tid}</code>\n"
+        f"Ник: {html.escape(u['nickname'] or '')}\n"
+        f"verified: {u['verified']}\naccepted_terms: {u['accepted_terms']}\n"
+        f"Сессий: {sc or 0}\nОтзывов: {fb or 0}",
+        reply_markup=MAIN_KB,
+    )
+
+@router.message(Command("reviews"))
+async def cmd_reviews(m: types.Message):
+    if not ADMIN_ID or m.from_user.id != ADMIN_ID:
+        return await m.answer("Команда доступна только администратору.", reply_markup=MAIN_KB)
+    try:
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT id, tg_id, username, rating, comment, created_at FROM feedback ORDER BY id DESC LIMIT 15"
+            )
+    except Exception as e:
+        logger.error("reviews: %s", e)
+        return await m.answer("❌ Ошибка базы.", reply_markup=MAIN_KB)
+    if not rows:
+        return await m.answer("Отзывов пока нет.", reply_markup=MAIN_KB)
+    chunks = []
+    for r in rows:
+        un = html.escape(r["username"] or "Anon")
+        cm = html.escape((r["comment"] or "")[:800])
+        chunks.append(
+            f"#{r['id']} tg=<code>{r['tg_id']}</code> @{un} ⭐{r['rating']}\n{cm}\n<i>{html.escape(r['created_at'] or '')}</i>"
+        )
+    text = "\n---\n".join(chunks)
+    if len(text) > 3800:
+        text = text[:3800] + "…"
+    await m.answer(text, reply_markup=MAIN_KB)
 
 @router.message(Command("help"))
 async def cmd_help(m: types.Message): await m.answer(HELP, reply_markup=MAIN_KB)
