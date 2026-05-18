@@ -20,7 +20,14 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiohttp import web
 
+LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+LOG_FILE = os.path.join(LOG_DIR, "task_check.log")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+file_handler = logging.handlers.RotatingFileHandler(LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8")
+file_handler.setLevel(logging.DEBUG)
+file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+logging.getLogger().addHandler(file_handler)
 logger = logging.getLogger(__name__)
 
 load_dotenv()
@@ -181,97 +188,145 @@ def _wc(text: str) -> int:
     return len([w for w in (text or "").split() if w])
 
 
+CONVERSATIONAL_MARKERS = (
+    "а", "да", "конечно", "ну", "ладно", "слушаю", "слушаю вас",
+    "кстати", "сейчас", "пожалуйста", "знаете", "вот", "пожалуй",
+    "зачем", "поэтому", "кажется", "как бы", "вроде"
+)
+
+
+def _has_conversational_marker(text: str) -> bool:
+    low = (text or "").lower()
+    for marker in CONVERSATIONAL_MARKERS:
+        if re.search(rf"\b{re.escape(marker)}\b", low):
+            return True
+    return False
+
+
+def _looks_like_keyword_list(text: str, keywords: set[str]) -> bool:
+    words = re.findall(r"[а-яёa-z0-9]+", (text or "").lower())
+    return bool(words) and all(w in keywords for w in words)
+
+
 def _organic_long(text: str, min_words: int = 4) -> bool:
-    return _wc(text) >= min_words
+    if _wc(text) >= min_words:
+        return True
+    return _has_conversational_marker(text)
 
 
-def _task_passes(t: dict, raw: str) -> bool:
+def _task_passes(t: dict, raw: str, user_id=None) -> bool:
     """Строгая проверка: смысл + органичность (где применимо)."""
     low = (raw or "").lower().replace("ё", "е")
     tx = (t.get("text") or "").lower()
 
+    def _log_pass(result: bool, reason: str):
+        logger.debug(
+            "user_id=%s task_id=%s task=%s raw=%r result=%s reason=%s",
+            user_id,
+            t.get("id"),
+            t.get("text"),
+            raw,
+            result,
+            reason,
+        )
+        return result
+
     if "2+2" in tx or "2+2" in low:
         ok_num = bool(re.search(r"\b4\b", low)) or "четыре" in low
         if not ok_num:
-            return False
+            return _log_pass(False, "нет ответа 4/четыре")
         if _wc(raw.strip()) < 2:
-            return False
+            return _log_pass(False, "слишком короткий ответ")
         only = raw.strip().lower().replace(" ", "")
         if only in ("4", "четыре"):
-            return False
-        return True
+            return _log_pass(False, "только число")
+        if _looks_like_keyword_list(raw, {"4", "четыре"}):
+            result = _has_conversational_marker(raw) or _wc(raw.strip()) >= 3
+            return _log_pass(result, "список ключевого слова с контекстом" if result else "список ключевого слова без контекста")
+        return _log_pass(True, "прямой ответ с контекстом")
 
     if "три любых цвета" in tx or "цвета радуги" in tx:
         words = re.findall(r"[а-яёa-z]+", low)
         found = {w for w in words if w in RAINBOW_COLORS}
         if len(found) < 3:
-            return False
+            return _log_pass(False, "меньше 3 цветов")
+        if _looks_like_keyword_list(raw, RAINBOW_COLORS):
+            result = _has_conversational_marker(raw) and _wc(raw) >= 4
+            return _log_pass(result, "список цветов с контекстом" if result else "список цветов без контекста")
         if _wc(raw) < 4:
-            return False
-        return True
+            return _log_pass(False, "слишком короткое сообщение")
+        return _log_pass(True, "цвета найдены в сообщении")
 
     if "столицу россии" in tx:
         if "москва" not in low:
-            return False
+            return _log_pass(False, "москва не найдена")
         if _wc(raw.strip()) < 2:
-            return False
-        return True
+            return _log_pass(False, "слишком короткий ответ")
+        if _looks_like_keyword_list(raw, {"москва"}):
+            result = _has_conversational_marker(raw) or _wc(raw.strip()) >= 3
+            return _log_pass(result, "Москва с контекстом" if result else "Москва без контекста")
+        return _log_pass(True, "Москва в ответе")
 
     if "имитируя крик" in tx or ("заглавными" in tx and "крик" in tx):
         s = raw or ""
         letters = [c for c in s if c.isalpha()]
         if len(letters) < 8:
-            return False
+            return _log_pass(False, "мало букв")
         up = sum(1 for c in letters if c.isupper())
         if up / len(letters) < 0.85:
-            return False
+            return _log_pass(False, "недостаточно заглавных")
         if _wc(s) < 2:
-            return False
-        return True
+            return _log_pass(False, "слишком коротко")
+        return _log_pass(True, "крик принят")
 
     if "обиделся" in tx:
         if _wc(raw) < 3:
-            return False
+            return _log_pass(False, "мало слов")
         if not any(m in low for m in OFFENDED_MARKERS):
-            return False
-        return True
+            return _log_pass(False, "нет маркера обиды")
+        return _log_pass(True, "обида обнаружена")
 
     if "боишься" in tx and "слышит" in tx:
         w = _wc(raw.strip())
         if w < 1 or w > 3:
-            return False
-        return True
+            return _log_pass(False, "неправильное количество слов")
+        return _log_pass(True, "короткий шёпот принят")
 
     if "крякни" in tx:
         if low.count("кря") < 5:
-            return False
+            return _log_pass(False, "мало кря")
         if _wc(raw) <= 5:
-            return False
-        return True
+            return _log_pass(False, "слишком короткий кряк")
+        return _log_pass(True, "кряк прошёл")
 
     if "ананасы" in tx and "пицце" in tx:
         if PIZZA_PHRASE.replace("ё", "е") not in low:
-            return False
+            return _log_pass(False, "нет полной фразы ананасы на пицце")
         if _wc(raw.strip()) <= _wc(PIZZA_PHRASE) + 1:
-            return False
-        return True
+            return _log_pass(False, "слишком коротко")
+        return _log_pass(True, "пицца принята")
 
     if "песенки" in tx or "песенк" in tx:
         hit = any(sn in low for sn in SONG_SNIPPETS)
         if not hit:
-            return False
+            return _log_pass(False, "нет строки песни")
         if _wc(raw.strip()) < 4:
-            return False
+            return _log_pass(False, "слишком коротко")
         for sn in SONG_SNIPPETS:
             if sn in low and raw.strip().lower().strip() == sn:
-                return False
-        return True
+                return _log_pass(False, "только сама строчка")
+        return _log_pass(True, "строка песни принята")
 
     # Fallback по keywords из БД (если текст задания меняли вручную)
     kws = [x.strip().lower() for x in (t.get("keywords") or "").split(",") if x.strip()]
     if kws and any(k in low for k in kws):
-        return _organic_long(raw, 3)
-    return False
+        kws_set = set(kws)
+        if _looks_like_keyword_list(raw, kws_set):
+            result = _has_conversational_marker(raw) and _wc(raw) >= 3
+            return _log_pass(result, "фолбэк ключевых слов с контекстом" if result else "фолбэк ключевых слов без контекста")
+        result = _organic_long(raw, 3)
+        return _log_pass(result, "фолбэк по органичности" if result else "фолбэк не прошёл")
+    return _log_pass(False, "ни одно правило не сработало")
 
 MAIN_KB = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text="🎮 Новая игра"), KeyboardButton(text="🏆 Рейтинг")],
@@ -478,7 +533,7 @@ async def handle_msg(msg: types.Message, state: FSMContext):
     if idx >= len(tasks): return
     t = tasks[idx]
     raw = msg.text or ""
-    if _task_passes(t, raw):
+    if _task_passes(t, raw, msg.from_user.id):
         await state.update_data(done=data["done"] + 1, idx=idx + 1)
         if idx + 1 < len(tasks):
             rn = ["Логика", "Актёрство", "Импровизация"][tasks[idx + 1]["round_num"] - 1]
