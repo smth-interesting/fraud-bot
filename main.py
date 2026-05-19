@@ -794,10 +794,13 @@ async def on_startup(app):
     await init_db()
     me = await bot.get_me()
     logger.info("🤖 Bot connected: @%s (id=%s)", me.username, me.id)
-    host = os.getenv("RENDER_EXTERNAL_HOSTNAME", "").strip()
+    host = os.getenv("RENDER_EXTERNAL_HOSTNAME", "").strip() or os.getenv("WEBHOOK_HOST", "").strip()
     if not host:
-        host = "localhost"
-        logger.warning("RENDER_EXTERNAL_HOSTNAME не задан — в логе показан условный URL; для продакшена задайте хост Render.")
+        logger.error(
+            "WEBHOOK host is not configured. Set RENDER_EXTERNAL_HOSTNAME or WEBHOOK_HOST in Render settings. "
+            "Without it, webhook URL cannot be built and Telegram updates не придут."
+        )
+        return
     url = f"https://{host}{WEBHOOK_PATH}"
     await bot.set_webhook(url, secret_token=WEBHOOK_SECRET or None)
     info = await bot.get_webhook_info()
